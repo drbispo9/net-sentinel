@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="NetSentinel Visual — Painel de monitoramento distribuído de dispositivos em tempo real.">
+  <title>NetSentinel Visual — Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-container">
+
+    <!-- ── Header ── -->
+    <header>
+      <div class="logo-container">
+        <div class="pulse-indicator status-up" id="global-pulse"></div>
+        <h1>NetSentinel <span class="badge">Visual</span></h1>
+      </div>
+
+      <div class="controls">
+        <!-- WebSocket Status -->
+        <div class="ws-status" title="Status da conexão em tempo real">
+          <div class="ws-dot connecting" id="ws-dot"></div>
+          <span id="ws-status-text">Conectando...</span>
+        </div>
+
+        <!-- Silence Alert Button (hidden by default) -->
+        <button id="btn-silenciar" class="btn danger hidden" title="Silenciar alerta sonoro">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            <line x1="23" y1="9" x2="17" y2="15"></line>
+            <line x1="17" y1="9" x2="23" y2="15"></line>
+          </svg>
+          <span>Silenciar</span>
+        </button>
+
+        <!-- Add Device Button -->
+        <button id="btn-add-device" class="btn primary" title="Cadastrar novo dispositivo">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5"  y1="12" x2="19" y2="12"></line>
+          </svg>
+          <span>Adicionar Dispositivo</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- ── Main Content ── -->
+    <main>
+
+      <!-- Navigation Tabs -->
+      <div class="nav-tabs">
+        <button class="nav-btn active" data-view="WEB">
+          <span class="nav-icon">🌐</span>
+          Monitoramento Web
+        </button>
+        <button class="nav-btn" data-view="HARDWARE">
+          <span class="nav-icon">🖥️</span>
+          Infraestrutura
+        </button>
+      </div>
+
+      <!-- Stats Bar -->
+      <div class="stats-bar">
+        <div class="stats-left">
+          <div class="stat-box">
+            <span class="stat-label">Total</span>
+            <strong class="stat-value" id="stat-total">0</strong>
+          </div>
+          <div class="stat-box">
+            <span class="stat-label">Online</span>
+            <strong class="stat-value text-success" id="stat-up">0</strong>
+          </div>
+          <div class="stat-box">
+            <span class="stat-label">Offline</span>
+            <strong class="stat-value text-danger" id="stat-down">0</strong>
+          </div>
+        </div>
+      </div>
+
+      <!-- Devices Section -->
+      <div class="section-header">
+        <span class="section-title" id="devices-section-title">Dispositivos web</span>
+      </div>
+
+      <div class="devices-grid" id="devices-grid">
+        <div class="loading-state">
+          <div class="spinner"></div>
+          <span style="font-size:0.85rem;color:var(--color-text-muted)">Carregando dispositivos...</span>
+        </div>
+      </div>
+
+      <!-- Event Log Section -->
+      <div class="section-header">
+        <span class="section-title">Log de eventos</span>
+      </div>
+
+      <div class="events-panel">
+        <div class="events-header">
+          <span class="events-title">Histórico de mudanças de status</span>
+          <span style="font-size:0.72rem;color:var(--color-text-muted)">Últimos 50 eventos desta sessão</span>
+        </div>
+        <div class="events-list" id="events-list">
+          <div class="events-empty">Aguardando eventos...</div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- ── Toast Container ── -->
+  <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+  <!-- ── Add Device Modal ── -->
+  <div class="modal-overlay" id="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal">
+      <h2 class="modal-title" id="modal-title">Adicionar Dispositivo</h2>
+
+      <form id="form-device" novalidate>
+        <input type="hidden" id="input-device-id" value="">
+        <div class="form-group">
+          <label for="input-name">Nome do Dispositivo</label>
+          <input
+            type="text"
+            id="input-name"
+            placeholder="ex: Servidor Principal, Router WAN..."
+            autocomplete="off"
+            required
+          >
+        </div>
+
+        <div class="form-group">
+          <label for="input-type">Tipo</label>
+          <select id="input-type" required>
+            <option value="WEB">🌐 Web (HTTP/HTTPS)</option>
+            <option value="HARDWARE">🖥️ Hardware (IP/Ping)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="input-address">Endereço</label>
+          <input
+            type="text"
+            id="input-address"
+            placeholder="https://example.com  ou  192.168.1.1"
+            autocomplete="off"
+            required
+          >
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn ghost" id="btn-modal-cancel">Cancelar</button>
+          <button type="submit" class="btn primary" id="btn-modal-save">Adicionar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ── Device Details Modal ── -->
+  <div class="modal-overlay" id="modal-details-overlay" role="dialog" aria-modal="true">
+    <div class="modal">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:0.5rem;">
+        <h2 class="modal-title" id="details-name" style="margin-bottom:0;">Carregando...</h2>
+        <span id="details-status-badge" class="card-status-badge">...</span>
+      </div>
+      <p id="details-address" class="card-address" style="margin-bottom:1.5rem;"></p>
+
+      <div class="details-grid">
+        <div class="stat-box" style="background:var(--color-surface); padding:1rem; border-radius:var(--radius-md); border:1px solid var(--color-border);">
+          <span class="stat-label">Uptime Estimado</span>
+          <strong class="stat-value" id="details-uptime" style="font-size:1.4rem;">--%</strong>
+        </div>
+        <div class="stat-box" style="background:var(--color-surface); padding:1rem; border-radius:var(--radius-md); border:1px solid var(--color-border);">
+          <span class="stat-label">Última Mudança</span>
+          <strong class="stat-value" id="details-last-change" style="font-size:1.1rem; line-height:1.2; margin-top:4px;">--</strong>
+        </div>
+      </div>
+
+      <h3 style="font-size:0.75rem; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:0.5rem; margin-top:1.5rem;">Eventos Recentes (Este Dispositivo)</h3>
+      <div class="events-list" id="details-events-list" style="max-height:180px; background:var(--color-surface); border:1px solid var(--color-border); border-radius:var(--radius-md);">
+        <div class="events-empty">Carregando...</div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn ghost" id="btn-details-close">Fechar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Alert audio -->
+  <audio id="audio-alert" loop preload="auto">
+    <source src="alerta_critico.wav" type="audio/wav">
+  </audio>
+
+  <script src="app.js"></script>
+</body>
+</html>
