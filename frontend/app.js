@@ -18,6 +18,9 @@ let pollTimer = null;
 let alertActive = false;
 let editingDeviceId = null;
 let currentView = 'WEB';
+let titleFlashInterval = null;
+let swRegistration = null;
+const ORIGINAL_TITLE = 'NetSentinel Visual — Dashboard';
 
 /* ─── DOM Refs ─── */
 const $ = (id) => document.getElementById(id);
@@ -112,10 +115,10 @@ function handleWsMessage(msg) {
       updateStats();
     }
 
-    if (msg.status === 'DOWN') {
+    if (msg.status === 'DOWN' || msg.status === 'CRITICAL_LOCK') {
       const dev = devices.find(d => d.id === msg.device_id);
       if (!dev || !dev.is_muted) {
-        triggerAlert(msg.device_name || 'Dispositivo');
+        triggerAlert(msg.device_name || 'Dispositivo', msg.status);
       }
     } else if (msg.status === 'UP') {
       showToast(`✅ ${msg.device_name || 'Dispositivo'} voltou online!`, 'success');
@@ -196,9 +199,9 @@ async function toggleMuteDevice(id) {
     showToast(newMuted ? `🔇 "${device.name}" silenciado.` : `🔊 "${device.name}" alerta reativado.`, 'info');
     if (newMuted) {
       checkAndStopAlert();
-    } else if (device.status === 'DOWN') {
-      // Re-trigger alert when unmuting a device that is still DOWN
-      triggerAlert(device.name);
+    } else if (device.status === 'DOWN' || device.status === 'CRITICAL_LOCK') {
+      // Re-trigger alert when unmuting a device that is still DOWN or in CRITICAL_LOCK
+      triggerAlert(device.name, device.status);
     }
   } catch (err) {
     showToast(`Erro: ${err.message}`, 'error');
@@ -414,31 +417,81 @@ function statusTag(s) {
 /* ────────────────────────────────────────────────
    Alert System
 ──────────────────────────────────────────────── */
-function triggerAlert(deviceName) {
+function triggerAlert(deviceName, status = 'DOWN') {
   alertActive = true;
   btnSilenciar.classList.remove('hidden');
-  showToast(`🚨 ${deviceName} está OFFLINE!`, 'error');
+  
+  const alertMsg = status === 'CRITICAL_LOCK' 
+    ? `🚨 ${deviceName} está em LOCK CRÍTICO!` 
+    : `🚨 ${deviceName} está OFFLINE!`;
+    
+  showToast(alertMsg, 'error');
 
   if (audioAlert) {
     audioAlert.play().catch(() => {
       console.warn('[Audio] Autoplay blocked by browser');
     });
   }
+
+  // Attempt to bring the window to the foreground
+  window.focus();
+
+  // Flash the document title to attract attention on the tab bar
+  startTitleFlash(alertMsg);
+
+  // Show OS notification via Service Worker (reliable click-to-focus)
+  if (swRegistration && Notification.permission === 'granted') {
+    swRegistration.showNotification(alertMsg, {
+      body: 'Clique para abrir o painel do NetSentinel',
+      requireInteraction: true
+    });
+  } else if ('Notification' in window && Notification.permission === 'granted') {
+    // Fallback: direct Notification (less reliable for focus)
+    const notif = new Notification(alertMsg, {
+      body: 'Clique para abrir o painel do NetSentinel',
+      requireInteraction: true
+    });
+    notif.onclick = function() {
+      window.focus();
+      notif.close();
+    };
+  }
 }
 
 function silenciarAlerta() {
   alertActive = false;
   btnSilenciar.classList.add('hidden');
+  stopTitleFlash();
   if (audioAlert) {
     audioAlert.pause();
     audioAlert.currentTime = 0;
   }
 }
 
-/** Check if any DOWN device is still un-muted; if not, stop audio */
+/* ── Title Flash (tab bar visual cue) ── */
+function startTitleFlash(msg) {
+  if (titleFlashInterval) return; // already flashing
+  let showAlert = true;
+  titleFlashInterval = setInterval(() => {
+    document.title = showAlert ? `⚠️ ALERTA — ${msg}` : ORIGINAL_TITLE;
+    showAlert = !showAlert;
+  }, 1000);
+  // Auto-stop when user focuses the window
+  window.addEventListener('focus', stopTitleFlash, { once: true });
+}
+
+function stopTitleFlash() {
+  if (titleFlashInterval) {
+    clearInterval(titleFlashInterval);
+    titleFlashInterval = null;
+    document.title = ORIGINAL_TITLE;
+  }
+}
+
+/** Check if any DOWN or CRITICAL_LOCK device is still un-muted; if not, stop audio */
 function checkAndStopAlert() {
-  const hasUnmutedDown = devices.some(d => d.status === 'DOWN' && !d.is_muted);
-  if (!hasUnmutedDown && alertActive) {
+  const hasUnmutedAlert = devices.some(d => (d.status === 'DOWN' || d.status === 'CRITICAL_LOCK') && !d.is_muted);
+  if (!hasUnmutedAlert && alertActive) {
     silenciarAlerta();
   }
 }
@@ -641,6 +694,21 @@ function formatTime(iso) {
    Init
 ──────────────────────────────────────────────── */
 function init() {
+  // Register Service Worker for reliable notification click handling
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').then(function(reg) {
+      swRegistration = reg;
+      console.log('[SW] Service Worker registered');
+    }).catch(function(err) {
+      console.warn('[SW] Registration failed:', err);
+    });
+  }
+
+  // Request OS Notification permission
+  if ('Notification' in window && Notification.permission !== 'granted' && Notification.permission !== 'denied') {
+    Notification.requestPermission();
+  }
+
   // Initial load
   fetchDevices();
   fetchEvents();

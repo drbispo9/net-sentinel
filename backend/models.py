@@ -11,6 +11,7 @@ class DeviceStatus(str, enum.Enum):
     UP = "UP"
     DOWN = "DOWN"
     WARNING = "WARNING"
+    CRITICAL_OVERLOAD = "CRITICAL_OVERLOAD"
 
 class Device(Base):
     __tablename__ = "devices"
@@ -22,6 +23,14 @@ class Device(Base):
     status = Column(Enum(DeviceStatus), default=DeviceStatus.UP)
     is_muted = Column(Boolean, default=False)
     failure_count = Column(Integer, default=0)
+    
+    # SNMP fields
+    comunidade_snmp = Column(String, nullable=True)
+    versao_snmp = Column(String, nullable=True) # e.g., 'v2c'
+    oid_cpu = Column(String, nullable=True)
+    ultimo_uso_cpu = Column(Float, nullable=True)
+    status_portas = Column(String, nullable=True) # JSON string
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

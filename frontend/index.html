@@ -153,6 +153,24 @@
           >
         </div>
 
+        <div id="snmp-fields" style="display:none; border-top: 1px solid var(--color-border); padding-top: 1rem; margin-top: 1rem;">
+          <div class="form-group">
+            <label for="input-snmp-community">Comunidade SNMP</label>
+            <input type="text" id="input-snmp-community" placeholder="public" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label for="input-snmp-version">Versão SNMP</label>
+            <select id="input-snmp-version">
+              <option value="v2c">v2c</option>
+              <option value="v1">v1</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="input-snmp-oid">OID CPU</label>
+            <input type="text" id="input-snmp-oid" placeholder="1.3.6.1.4.1.9.9.109.1.1.1.1.5.1" autocomplete="off">
+          </div>
+        </div>
+
         <div class="modal-footer">
           <button type="button" class="btn ghost" id="btn-modal-cancel">Cancelar</button>
           <button type="submit" class="btn primary" id="btn-modal-save">Adicionar</button>

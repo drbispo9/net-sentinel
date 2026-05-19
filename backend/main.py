@@ -1,6 +1,6 @@
 import os
-from fastapi import FastAPI, Depends, HTTPException, Security, WebSocket, WebSocketDisconnect
-from fastapi.security.api_key import APIKeyHeader
+import asyncio
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from typing import List
 from contextlib import asynccontextmanager
@@ -9,14 +9,10 @@ from pathlib import Path
 
 from .database import engine, Base, get_db
 from .models import Device, EventLog, DeviceStatus, DeviceType
-from .schemas import WorkerReport, DeviceResponse, DeviceCreate, EventLogResponse, DeviceStatsResponse, DeviceUpdate
+from .schemas import DeviceResponse, DeviceCreate, EventLogResponse, DeviceStatsResponse, DeviceUpdate
 from .monitor import MonitorManager
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
-
-API_KEY_NAME = "X-API-KEY"
-API_KEY = os.getenv("WORKER_AUTH_KEY", "your-super-secret-worker-key")
-api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
 
 class ConnectionManager:
     def __init__(self):
@@ -45,11 +41,19 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     
-    # Start background monitor
-    monitor.start()
+    # Start background monitors
+    monitor.running = True
+    web_task = asyncio.create_task(monitor.monitor_web_loop())
+    hardware_task = asyncio.create_task(monitor.monitor_hardware_loop())
+    db_task = asyncio.create_task(monitor.monitor_database_loop())
+    
     yield
+    
     # Shutdown
-    monitor.stop()
+    monitor.running = False
+    web_task.cancel()
+    hardware_task.cancel()
+    db_task.cancel()
 
 app = FastAPI(title="NetSentinel API", lifespan=lifespan)
 
@@ -60,11 +64,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-async def get_api_key(api_key_header: str = Security(api_key_header)):
-    if api_key_header != API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid API Key")
-    return api_key_header
-
 @app.get("/api/devices", response_model=List[DeviceResponse])
 async def get_devices(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Device))
@@ -85,6 +84,9 @@ async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db
         status=DeviceStatus.UP,
         is_muted=payload.is_muted or False,
         failure_count=0,
+        comunidade_snmp=payload.comunidade_snmp,
+        versao_snmp=payload.versao_snmp,
+        oid_cpu=payload.oid_cpu,
     )
     db.add(device)
     await db.commit()
@@ -119,6 +121,13 @@ async def update_device(device_id: int, payload: DeviceUpdate, db: AsyncSession 
             device.device_type = DeviceType(payload.device_type)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid device_type")
+            
+    if payload.comunidade_snmp is not None:
+        device.comunidade_snmp = payload.comunidade_snmp
+    if payload.versao_snmp is not None:
+        device.versao_snmp = payload.versao_snmp
+    if payload.oid_cpu is not None:
+        device.oid_cpu = payload.oid_cpu
             
     await db.commit()
     await db.refresh(device)
@@ -168,44 +177,6 @@ async def get_device_stats(device_id: int, db: AsyncSession = Depends(get_db)):
         "last_status_change": last_change,
         "recent_events": events
     }
-
-@app.post("/api/report-interno")
-async def report_interno(
-    report: WorkerReport, 
-    api_key: str = Depends(get_api_key),
-    db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(select(Device).where(Device.id == report.device_id, Device.device_type == DeviceType.HARDWARE))
-    device = result.scalars().first()
-    
-    if not device:
-        raise HTTPException(status_code=404, detail="Hardware device not found")
-        
-    if device.status != report.status:
-        old_status = device.status
-        device.status = report.status
-        
-        # Log event
-        log = EventLog(
-            device_id=device.id,
-            old_status=old_status,
-            new_status=report.status,
-            latency=report.latency
-        )
-        db.add(log)
-        await db.commit()
-        
-        # Broadcast alert
-        if report.status == DeviceStatus.DOWN:
-            await manager.broadcast({
-                "type": "status_change",
-                "priority": "high",
-                "device_id": device.id,
-                "device_name": device.name,
-                "status": "DOWN"
-            })
-            
-    return {"message": "Status updated successfully"}
 
 @app.get("/api/events", response_model=List[EventLogResponse])
 async def get_events(db: AsyncSession = Depends(get_db)):

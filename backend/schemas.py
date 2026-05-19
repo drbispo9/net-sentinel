@@ -3,23 +3,23 @@ from typing import Optional, List
 from datetime import datetime
 from .models import DeviceStatus
 
-class WorkerReport(BaseModel):
-    device_id: int
-    status: DeviceStatus
-    latency: Optional[float] = None
-    packet_loss: Optional[float] = None
-
 class DeviceCreate(BaseModel):
     name: str
     device_type: str
     address: str
     is_muted: Optional[bool] = False
+    comunidade_snmp: Optional[str] = None
+    versao_snmp: Optional[str] = "v2c"
+    oid_cpu: Optional[str] = None
 
 class DeviceUpdate(BaseModel):
     name: Optional[str] = None
     device_type: Optional[str] = None
     address: Optional[str] = None
     is_muted: Optional[bool] = None
+    comunidade_snmp: Optional[str] = None
+    versao_snmp: Optional[str] = None
+    oid_cpu: Optional[str] = None
 
 class DeviceResponse(BaseModel):
     id: int
@@ -29,6 +29,11 @@ class DeviceResponse(BaseModel):
     status: str
     is_muted: bool
     failure_count: int
+    comunidade_snmp: Optional[str] = None
+    versao_snmp: Optional[str] = None
+    oid_cpu: Optional[str] = None
+    ultimo_uso_cpu: Optional[float] = None
+    status_portas: Optional[str] = None
 
     class Config:
         from_attributes = True
