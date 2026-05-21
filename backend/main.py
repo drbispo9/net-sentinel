@@ -8,8 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 
 from .database import engine, Base, get_db
-from .models import Device, EventLog, DeviceStatus, DeviceType
-from .schemas import DeviceResponse, DeviceCreate, EventLogResponse, DeviceStatsResponse, DeviceUpdate
+from .models import Device, EventLog, DeviceStatus, DeviceType, PerformanceLog
+from .schemas import DeviceResponse, DeviceCreate, EventLogResponse, DeviceStatsResponse, DeviceUpdate, PerformanceLogResponse
 from .monitor import MonitorManager
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
@@ -77,6 +77,10 @@ async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid device_type. Must be WEB or HARDWARE.")
 
+    slug = payload.slug_identificador
+    if not slug and payload.address and "servicos.oabgo.org.br" in payload.address.lower():
+        slug = "portal_oab"
+
     device = Device(
         name=payload.name,
         device_type=device_type,
@@ -87,6 +91,7 @@ async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db
         comunidade_snmp=payload.comunidade_snmp,
         versao_snmp=payload.versao_snmp,
         oid_cpu=payload.oid_cpu,
+        slug_identificador=slug,
     )
     db.add(device)
     await db.commit()
@@ -114,6 +119,8 @@ async def update_device(device_id: int, payload: DeviceUpdate, db: AsyncSession 
         device.name = payload.name
     if payload.address is not None:
         device.address = payload.address
+        if "servicos.oabgo.org.br" in payload.address.lower():
+            device.slug_identificador = "portal_oab"
     if payload.is_muted is not None:
         device.is_muted = payload.is_muted
     if payload.device_type is not None:
@@ -128,6 +135,8 @@ async def update_device(device_id: int, payload: DeviceUpdate, db: AsyncSession 
         device.versao_snmp = payload.versao_snmp
     if payload.oid_cpu is not None:
         device.oid_cpu = payload.oid_cpu
+    if payload.slug_identificador is not None:
+        device.slug_identificador = payload.slug_identificador
             
     await db.commit()
     await db.refresh(device)
@@ -178,6 +187,55 @@ async def get_device_stats(device_id: int, db: AsyncSession = Depends(get_db)):
         "recent_events": events
     }
 
+@app.get("/api/devices/{device_id}/performance", response_model=List[PerformanceLogResponse])
+async def get_device_performance(device_id: int, limit: int = 20, db: AsyncSession = Depends(get_db)):
+    """Return the last `limit` L7 performance records for a WEB device."""
+    result = await db.execute(select(Device).where(Device.id == device_id))
+    device = result.scalars().first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    stmt = (
+        select(PerformanceLog)
+        .where(PerformanceLog.device_id == device_id)
+        .order_by(desc(PerformanceLog.timestamp))
+        .limit(max(1, min(limit, 100)))  # clamp between 1 and 100
+    )
+    result = await db.execute(stmt)
+    logs = result.scalars().all()
+    return logs
+
+
+@app.get("/api/devices/{device_id}/report/pdf")
+async def get_device_report_pdf(device_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Device).where(Device.id == device_id))
+    device = result.scalars().first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    stmt = (
+        select(EventLog)
+        .where(EventLog.device_id == device_id)
+        .order_by(desc(EventLog.timestamp))
+        .limit(100)
+    )
+    events_res = await db.execute(stmt)
+    events = events_res.scalars().all()
+
+    from .services.pdf_service import generate_device_pdf
+    try:
+        pdf_buffer = generate_device_pdf(device, events)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate PDF: {str(e)}")
+
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        pdf_buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=relatorio_{device.name.replace(' ', '_')}.pdf"}
+    )
+
+
 @app.get("/api/events", response_model=List[EventLogResponse])
 async def get_events(db: AsyncSession = Depends(get_db)):
     stmt = (
@@ -215,3 +273,5 @@ async def websocket_endpoint(websocket: WebSocket):
 _FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 if _FRONTEND_DIR.is_dir():
     app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
+
+

@@ -7,3 +7,4 @@ httpx
 websockets
 pydantic-settings
 pysnmp
+reportlab

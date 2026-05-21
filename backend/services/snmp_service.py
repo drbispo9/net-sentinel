@@ -12,7 +12,7 @@ async def get_snmp_cpu(ip: str, community: str, oid_str: str, version: str = 'v2
     iterator = get_cmd(
         SnmpEngine(),
         CommunityData(community, mpModel=mp_model),
-        UdpTransportTarget((ip, 161), timeout=5.0, retries=0),
+        UdpTransportTarget((ip, 161), timeout=1.0, retries=0),
         ContextData(),
         ObjectType(ObjectIdentity(oid_str))
     )

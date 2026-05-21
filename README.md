@@ -1,4 +1,4 @@
-# 🛡️ NetSentinel Visual
+# 🛡️ NetSentinel
 
 **Painel de monitoramento distribuído de dispositivos em tempo real.**
 

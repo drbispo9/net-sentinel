@@ -439,6 +439,24 @@ main {
   overflow-wrap: anywhere;
 }
 
+.status-container {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.response-time {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(99, 179, 255, 0.08);
+  border: 0.5px solid rgba(99, 179, 255, 0.2);
+  color: #63b3ff;
+  transition: all var(--transition);
+}
+
 .card-status-badge {
   display: inline-flex;
   align-items: center;
@@ -884,3 +902,205 @@ select option {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 6px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--color-border-h); }
+
+/* ─── Details Modal — Wide Variant ─── */
+.modal-details-wide {
+  max-width: 620px;
+  padding: 1.75rem;
+}
+
+.details-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.details-header-left { flex: 1; min-width: 0; }
+
+.details-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.btn-icon-close {
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  line-height: 0;
+}
+
+/* ─── Details Stats Row ─── */
+.details-stats-row {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.5rem;
+}
+
+.details-stat-box {
+  flex: 1 1 110px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0.9rem 1rem;
+  background: var(--color-surface);
+  border: 0.5px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-metric);
+}
+
+/* ─── Section Labels ─── */
+.details-section-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin-bottom: 0.65rem;
+}
+
+.details-section-sub {
+  font-size: 0.68rem;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+  opacity: 0.75;
+}
+
+/* ─── L7 Chart ─── */
+.l7-chart {
+  background: var(--color-surface);
+  border: 0.5px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.l7-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.l7-bar-row {
+  display: grid;
+  grid-template-columns: 140px 1fr 52px;
+  align-items: center;
+  gap: 0.75rem;
+  animation: row-in 0.3s ease both;
+}
+
+.l7-bar-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.l7-bar-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+.l7-bar-name {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.l7-bar-track {
+  height: 8px;
+  background: rgba(99,179,255,0.07);
+  border-radius: 999px;
+  overflow: hidden;
+  border: 0.5px solid var(--color-border);
+}
+
+.l7-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.7s cubic-bezier(0.4, 0, 0.2, 1);
+  opacity: 0.85;
+}
+
+.l7-bar-value {
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ─── Sparkline ─── */
+.l7-sparkline-container {
+  background: var(--color-surface);
+  border: 0.5px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.75rem 1rem;
+}
+
+.spark-meta {
+  display: flex;
+  gap: 1.25rem;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  margin-bottom: 0.6rem;
+}
+
+.spark-meta strong { font-weight: 700; }
+
+.spark-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 56px;
+  padding-bottom: 2px;
+}
+
+.spark-bar {
+  flex: 1;
+  border-radius: 3px 3px 0 0;
+  min-width: 4px;
+  opacity: 0.8;
+  transition: opacity var(--transition);
+  cursor: default;
+}
+
+.spark-bar:hover { opacity: 1; }
+
+.spark-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.62rem;
+  color: var(--color-text-muted);
+  opacity: 0.65;
+  margin-top: 4px;
+}
+
+/* ─── Responsive tweaks for wide modal ─── */
+@media (max-width: 680px) {
+  .modal-details-wide { max-width: 100%; }
+  .l7-bar-row { grid-template-columns: 110px 1fr 44px; }
+}
+
+.spinning {
+  animation: spin 0.8s linear infinite !important;
+}
+

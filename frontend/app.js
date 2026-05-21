@@ -11,16 +11,17 @@ const TOAST_DURATION_MS = 5000;
 
 /* ─── State ─── */
 let devices = [];
-let eventLogs = [];
 let wsSocket = null;
 let wsReconnectTimer = null;
 let pollTimer = null;
 let alertActive = false;
 let editingDeviceId = null;
+let currentDetailsDeviceId = null;
+let currentDetailsDevice = null;
 let currentView = 'WEB';
 let titleFlashInterval = null;
 let swRegistration = null;
-const ORIGINAL_TITLE = 'NetSentinel Visual — Dashboard';
+const ORIGINAL_TITLE = 'NetSentinel — Dashboard';
 
 /* ─── DOM Refs ─── */
 const $ = (id) => document.getElementById(id);
@@ -35,7 +36,6 @@ const btnAdd       = $('btn-add-device');
 const toastCon     = $('toast-container');
 const wsStatusDot  = $('ws-dot');
 const wsStatusText = $('ws-status-text');
-const eventsList   = $('events-list');
 const audioAlert   = $('audio-alert');
 const sectionTitle = $('devices-section-title');
 const navBtns      = document.querySelectorAll('.nav-btn');
@@ -52,14 +52,20 @@ const btnModalCancel = $('btn-modal-cancel');
 const btnModalSave   = $('btn-modal-save');
 
 // Details Modal
-const detailsOverlay = $('modal-details-overlay');
-const btnDetailsClose = $('btn-details-close');
-const detailsName = $('details-name');
-const detailsStatusBadge = $('details-status-badge');
-const detailsAddress = $('details-address');
-const detailsUptime = $('details-uptime');
-const detailsLastChange = $('details-last-change');
-const detailsEventsList = $('details-events-list');
+const detailsOverlay      = $('modal-details-overlay');
+const btnDetailsClose     = $('btn-details-close');
+const detailsName         = $('details-name');
+const detailsStatusBadge  = $('details-status-badge');
+const detailsAddress      = $('details-address');
+const detailsUptime       = $('details-uptime');
+const detailsLastChange   = $('details-last-change');
+const detailsEventsList   = $('details-events-list');
+const detailsL7Section    = $('details-l7-section');
+const detailsL7Chart      = $('details-l7-chart');
+const detailsL7Timestamp  = $('details-l7-timestamp');
+const detailsSparkline    = $('details-sparkline');
+const detailsTotalMsBox   = $('details-total-ms-box');
+const detailsTotalMs      = $('details-total-ms');
 
 /* ────────────────────────────────────────────────
    WebSocket
@@ -96,33 +102,38 @@ function connectWS() {
 }
 
 function handleWsMessage(msg) {
-  if (msg.type === 'status_change') {
-    // Update device in local state immediately
+  // Normalize incoming status labels from WebSocket
+  if (msg.status === 'online') msg.status = 'UP';
+  if (msg.status === 'offline') msg.status = 'DOWN';
+
+  if (msg.type === 'status_change' || msg.type === 'status_update') {
     const device = devices.find(d => d.id === msg.device_id);
     if (device) {
       const oldStatus = device.status;
-      device.status = msg.status;
+      const statusChanged = msg.status && device.status !== msg.status;
 
-      // Push synthetic event
-      pushEvent({
-        device_name: msg.device_name || device.name,
-        old_status: oldStatus,
-        new_status: msg.status,
-        timestamp: new Date().toISOString(),
-      });
+      if (msg.status) device.status = msg.status;
+      if (msg.response_time_ms !== undefined) device.response_time_ms = msg.response_time_ms;
+      if (msg.dns_ms !== undefined) device.dns_ms = msg.dns_ms;
 
       renderDevices();
       updateStats();
-    }
 
-    if (msg.status === 'DOWN' || msg.status === 'CRITICAL_LOCK') {
-      const dev = devices.find(d => d.id === msg.device_id);
-      if (!dev || !dev.is_muted) {
-        triggerAlert(msg.device_name || 'Dispositivo', msg.status);
+      if (detailsOverlay.classList.contains('open') && currentDetailsDevice && currentDetailsDevice.id === msg.device_id) {
+        refreshDeviceDetails(true);
       }
-    } else if (msg.status === 'UP') {
-      showToast(`✅ ${msg.device_name || 'Dispositivo'} voltou online!`, 'success');
-      checkAndStopAlert();
+
+      // Only handle alerts/toasts for actual status changes to avoid repetitive audio/toasts
+      if (msg.type === 'status_change' && statusChanged) {
+        if (device.status === 'DOWN' || device.status === 'CRITICAL_LOCK' || device.status === 'CRITICAL_OVERLOAD') {
+          if (!device.is_muted) {
+            triggerAlert(msg.device_name || device.name, device.status);
+          }
+        } else if (device.status === 'UP') {
+          showToast(`✅ ${msg.device_name || device.name} voltou online!`, 'success');
+          checkAndStopAlert();
+        }
+      }
     }
   }
 }
@@ -138,23 +149,16 @@ async function fetchDevices() {
     mergeDevices(data);
     renderDevices();
     updateStats();
+
+    if (detailsOverlay.classList.contains('open') && currentDetailsDevice) {
+      refreshDeviceDetails(true);
+    }
   } catch (err) {
     console.error('[API] fetchDevices failed:', err);
     if (devices.length === 0) renderEmptyState('Não foi possível conectar ao servidor.', true);
   }
 }
 
-async function fetchEvents() {
-  try {
-    const res = await fetch(`${API_BASE}/api/events`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    eventLogs = data;
-    renderEvents();
-  } catch (err) {
-    console.error('[API] fetchEvents failed:', err);
-  }
-}
 
 async function addDevice(payload) {
   const res = await fetch(`${API_BASE}/api/devices`, {
@@ -266,7 +270,7 @@ function renderDevices() {
       if (e.target.closest('.btn-delete') || e.target.closest('.btn-edit') || e.target.closest('.btn-mute')) return;
       const id = Number(card.dataset.id);
       const device = devices.find(d => d.id === id);
-      if (device) openDeviceDetails(id, device.name, device.address, device.status);
+      if (device) openDeviceDetails(id, device.name, device.address, device.status, device.device_type);
     });
   });
 }
@@ -285,7 +289,7 @@ function deviceCardHTML(d) {
     WARNING: 'badge-warning',
   }[d.status] || '';
 
-  const typeLabel = d.device_type === 'WEB' ? '🌐 Web' : '🖥️ Hardware';
+  const typeLabel = d.device_type === 'WEB' ? 'Web' : 'Hardware';
   const failures = d.failure_count > 0
     ? `<span class="card-failures">Falhas: <span>${d.failure_count}</span></span>`
     : `<span class="card-failures" style="color:var(--color-up)">Sem falhas</span>`;
@@ -302,6 +306,16 @@ function deviceCardHTML(d) {
 
   const mutedIndicator = d.is_muted ? '<span class="muted-indicator" title="Alerta silenciado">🔇</span>' : '';
 
+  const isOnline = d.status === 'UP';
+  const showResponseTime = isOnline && d.response_time_ms !== null && d.response_time_ms !== undefined;
+  let responseTimeHtml = '';
+  if (showResponseTime) {
+    const color = getLatencyColor(d.response_time_ms);
+    const bg = hexToRgba(color, 0.08);
+    const border = hexToRgba(color, 0.2);
+    responseTimeHtml = `<span class="response-time" style="color: ${color}; background: ${bg}; border: 0.5px solid ${border};">${d.response_time_ms}ms</span>`;
+  }
+
   return `
     <div class="device-card card-${statusClass} ${d.is_muted ? 'card-muted' : ''}" data-id="${d.id}">
       <div class="card-header">
@@ -309,7 +323,10 @@ function deviceCardHTML(d) {
           <div class="card-title">${escHtml(d.name)} ${mutedIndicator}</div>
           <div class="card-address">${escHtml(d.address)}</div>
         </div>
-        <span class="card-status-badge ${badgeClass}">${statusLabel}</span>
+        <div class="status-container">
+          <span class="card-status-badge ${badgeClass}">${statusLabel}</span>
+          ${responseTimeHtml}
+        </div>
       </div>
       <div class="card-meta">
         <span class="card-type-badge">${typeLabel}</span>
@@ -371,39 +388,6 @@ function animateNumber(el, target) {
   }, 40);
 }
 
-/* ────────────────────────────────────────────────
-   Render — Event Logs
-──────────────────────────────────────────────── */
-function pushEvent(ev) {
-  eventLogs.unshift(ev); // newest first
-  if (eventLogs.length > 50) eventLogs.pop();
-  renderEvents();
-}
-
-function renderEvents() {
-  if (eventLogs.length === 0) {
-    eventsList.innerHTML = '<div class="events-empty">Nenhum evento registrado ainda.</div>';
-    return;
-  }
-
-  eventsList.innerHTML = eventLogs.map(ev => {
-    const time = formatTime(ev.timestamp);
-    const oldTag = statusTag(ev.old_status);
-    const newTag = statusTag(ev.new_status);
-
-    return `
-      <div class="event-row">
-        <span class="event-time">${time}</span>
-        <span class="event-device">${escHtml(ev.device_name)}</span>
-        <span class="event-transition">
-          <span class="${oldTag.cls}">${oldTag.label}</span>
-          <span class="arrow-icon">→</span>
-          <span class="${newTag.cls}">${newTag.label}</span>
-        </span>
-      </div>
-    `;
-  }).join('');
-}
 
 function statusTag(s) {
   const map = {
@@ -531,55 +515,231 @@ function closeModal() {
 
 function closeDetailsModal() {
   detailsOverlay.classList.remove('open');
+  currentDetailsDeviceId = null;
+  currentDetailsDevice = null;
 }
 
-async function openDeviceDetails(id, name, address, status) {
+/* ────────────────────────────────────────────────
+   Device Details — Stats + L7 Performance
+──────────────────────────────────────────────── */
+async function refreshDeviceDetails(silent = false) {
+  if (!currentDetailsDevice) return;
+  const { id, name, address, deviceType } = currentDetailsDevice;
+
+  // If not silent, show loading states
+  if (!silent) {
+    detailsUptime.textContent = '...';
+    detailsLastChange.textContent = '--';
+    detailsEventsList.innerHTML = '<div class="events-empty"><div class="spinner" style="width:20px;height:20px;margin:0 auto;"></div></div>';
+    if (deviceType === 'WEB') {
+      detailsL7Chart.innerHTML = '<div class="l7-loading"><div class="spinner" style="width:20px;height:20px;"></div></div>';
+      detailsSparkline.innerHTML = '<div class="l7-loading"><div class="spinner" style="width:16px;height:16px;"></div></div>';
+    }
+  }
+
+  // Spin the reload button icon if present and not a silent refresh
+  const reloadBtnSvg = $('btn-details-reload')?.querySelector('svg');
+  if (reloadBtnSvg && !silent) {
+    reloadBtnSvg.classList.add('spinning');
+  }
+
+  // Update badge and total response time from global state
+  const updatedDev = devices.find(d => d.id === id);
+  if (updatedDev) {
+    const bCls = { UP: 'badge-up', DOWN: 'badge-down', WARNING: 'badge-warning' }[updatedDev.status] || '';
+    const lbl  = { UP: '● Online', DOWN: '● Offline', WARNING: '● Alerta' }[updatedDev.status] || updatedDev.status;
+    detailsStatusBadge.className = `card-status-badge ${bCls}`;
+    detailsStatusBadge.textContent = lbl;
+
+    if (updatedDev.device_type === 'WEB') {
+      if (updatedDev.status === 'UP' && updatedDev.response_time_ms != null) {
+        detailsTotalMs.textContent = `${Math.round(updatedDev.response_time_ms)}ms`;
+        detailsTotalMs.style.color = getLatencyColor(updatedDev.response_time_ms);
+      } else {
+        detailsTotalMs.textContent = 'N/A';
+        detailsTotalMs.style.color = 'var(--color-text-muted)';
+      }
+    }
+  }
+
+  const isWeb = deviceType === 'WEB';
+  const statsPromise = fetch(`${API_BASE}/api/devices/${id}/stats`).then(r => r.ok ? r.json() : Promise.reject(r.status));
+  const perfPromise  = isWeb
+    ? fetch(`${API_BASE}/api/devices/${id}/performance?limit=20`).then(r => r.ok ? r.json() : Promise.reject(r.status))
+    : Promise.resolve([]);
+
+  try {
+    const [statsData, perfData] = await Promise.allSettled([statsPromise, perfPromise]);
+
+    // ── Stats ──────────────────────────────────────────────────────────────
+    if (statsData.status === 'fulfilled') {
+      const data = statsData.value;
+      detailsUptime.textContent = `${data.uptime_percentage.toFixed(1)}%`;
+      detailsLastChange.textContent = data.last_status_change ? formatTime(data.last_status_change) : 'N/A';
+
+      if (data.recent_events && data.recent_events.length > 0) {
+        detailsEventsList.innerHTML = data.recent_events.map(ev => {
+          const time   = formatTime(ev.timestamp);
+          const oldTag = statusTag(ev.old_status);
+          const newTag = statusTag(ev.new_status);
+          return `
+            <div class="event-row" style="grid-template-columns:80px 1fr; padding:0.5rem 1rem;">
+              <span class="event-time">${time}</span>
+              <span class="event-transition">
+                <span class="${oldTag.cls}">${oldTag.label}</span>
+                <span class="arrow-icon">→</span>
+                <span class="${newTag.cls}">${newTag.label}</span>
+              </span>
+            </div>`;
+        }).join('');
+      } else {
+        detailsEventsList.innerHTML = '<div class="events-empty">Nenhum evento registrado.</div>';
+      }
+    } else {
+      detailsUptime.textContent = '--%';
+      detailsEventsList.innerHTML = '<div class="events-empty">Erro ao carregar dados.</div>';
+    }
+
+    // ── L7 Performance ─────────────────────────────────────────────────────
+    if (isWeb && perfData.status === 'fulfilled') {
+      const logs = perfData.value; // newest first
+      renderL7Chart(logs);
+      renderSparkline(logs);
+    } else if (isWeb) {
+      detailsL7Chart.innerHTML = '<div class="events-empty">Dados de performance ainda não disponíveis (aguarde o próximo ciclo de checagem).</div>';
+      detailsSparkline.innerHTML = '';
+    }
+
+    // Force total response time to N/A if device is DOWN, regardless of the historical performance logs
+    if (updatedDev && updatedDev.status !== 'UP') {
+      detailsTotalMs.textContent = 'N/A';
+      detailsTotalMs.style.color = 'var(--color-text-muted)';
+    }
+
+  } catch (err) {
+    console.error('[API] refreshDeviceDetails failed:', err);
+  } finally {
+    if (reloadBtnSvg) {
+      setTimeout(() => {
+        reloadBtnSvg.classList.remove('spinning');
+      }, 500);
+    }
+  }
+}
+
+async function openDeviceDetails(id, name, address, status, deviceType) {
+  currentDetailsDeviceId = id;
+  currentDetailsDevice = { id, name, address, status, deviceType };
+
+  // Set initial modal details
   detailsName.textContent = name;
   detailsAddress.textContent = address;
-  
+
   const bCls = { UP: 'badge-up', DOWN: 'badge-down', WARNING: 'badge-warning' }[status] || '';
-  const lbl = { UP: '● Online', DOWN: '● Offline', WARNING: '● Alerta' }[status] || status;
+  const lbl  = { UP: '● Online', DOWN: '● Offline', WARNING: '● Alerta' }[status] || status;
   detailsStatusBadge.className = `card-status-badge ${bCls}`;
   detailsStatusBadge.textContent = lbl;
 
-  detailsUptime.textContent = '...';
-  detailsLastChange.textContent = '--';
-  detailsEventsList.innerHTML = '<div class="events-empty"><div class="spinner" style="width:20px;height:20px;margin:0 auto;"></div></div>';
-  
+  // Show or hide L7 section based on device type
+  const isWeb = deviceType === 'WEB';
+  detailsL7Section.style.display  = isWeb ? '' : 'none';
+  detailsTotalMsBox.style.display = isWeb ? '' : 'none';
+
   detailsOverlay.classList.add('open');
 
-  try {
-    const res = await fetch(`${API_BASE}/api/devices/${id}/stats`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    
-    detailsUptime.textContent = `${data.uptime_percentage.toFixed(1)}%`;
-    detailsLastChange.textContent = data.last_status_change ? formatTime(data.last_status_change) : 'N/A';
-    
-    if (data.recent_events && data.recent_events.length > 0) {
-      detailsEventsList.innerHTML = data.recent_events.map(ev => {
-        const time = formatTime(ev.timestamp);
-        const oldTag = statusTag(ev.old_status);
-        const newTag = statusTag(ev.new_status);
-        return `
-          <div class="event-row" style="grid-template-columns: 80px 1fr; padding: 0.5rem 1rem;">
-            <span class="event-time">${time}</span>
-            <span class="event-transition">
-              <span class="${oldTag.cls}">${oldTag.label}</span>
-              <span class="arrow-icon">→</span>
-              <span class="${newTag.cls}">${newTag.label}</span>
-            </span>
-          </div>
-        `;
-      }).join('');
-    } else {
-      detailsEventsList.innerHTML = '<div class="events-empty">Nenhum evento registrado.</div>';
-    }
-  } catch(err) {
-    console.error('[API] fetchStats failed:', err);
-    detailsUptime.textContent = '--%';
-    detailsEventsList.innerHTML = `<div class="events-empty">Erro ao carregar dados.</div>`;
+  await refreshDeviceDetails(false);
+}
+
+/* ── L7 Bar Chart ── */
+function renderL7Chart(logs) {
+  if (!logs || logs.length === 0) {
+    detailsL7Chart.innerHTML = '<div class="events-empty">Dados de performance ainda não disponíveis.</div>';
+    detailsTotalMs.textContent = '--';
+    return;
   }
+
+  const latest = logs[0]; // most recent check
+  const total  = latest.total_ms || 1;
+
+  // Show total in stats row
+  if (latest.total_ms != null) {
+    detailsTotalMs.textContent = `${Math.round(latest.total_ms)}ms`;
+    const col = getLatencyColor(latest.total_ms);
+    detailsTotalMs.style.color = col;
+  }
+
+  const segments = [
+    { key: 'dns_ms',      label: 'DNS + TCP',       color: '#63b3ff' },
+    { key: 'ssl_ms',      label: 'TLS/SSL',          color: '#a78bfa' },
+    { key: 'ttfb_ms',     label: 'TTFB (Servidor)',  color: '#f59e0b' },
+    { key: 'download_ms', label: 'Download',         color: '#63b3ff' },
+  ];
+
+  detailsL7Chart.innerHTML = segments.map(seg => {
+    const val = latest[seg.key];
+    if (val == null || val <= 0) return ''; // skip missing or zero values
+    const pct = Math.min(100, (val / total) * 100);
+    const valColor = getLatencyColor(val);
+    return `
+      <div class="l7-bar-row">
+        <div class="l7-bar-label">
+          <span class="l7-bar-dot" style="background:${seg.color};"></span>
+          <span class="l7-bar-name">${seg.label}</span>
+        </div>
+        <div class="l7-bar-track">
+          <div class="l7-bar-fill" style="width:0%; background:${seg.color};" data-pct="${pct.toFixed(1)}"></div>
+        </div>
+        <span class="l7-bar-value" style="color:${valColor};">${Math.round(val)}ms</span>
+      </div>`;
+  }).join('');
+
+  // Animate bars after DOM paint
+  requestAnimationFrame(() => {
+    detailsL7Chart.querySelectorAll('.l7-bar-fill').forEach(bar => {
+      bar.style.width = bar.dataset.pct + '%';
+    });
+  });
+}
+
+/* ── Sparkline ── */
+function renderSparkline(logs) {
+  if (!logs || logs.length === 0) {
+    detailsSparkline.innerHTML = '<div class="events-empty" style="padding:0.75rem;">Sem histórico suficiente.</div>';
+    return;
+  }
+
+  // Logs come newest-first — reverse for left-to-right timeline
+  const ordered = [...logs].reverse().filter(l => l.total_ms != null);
+  if (ordered.length === 0) {
+    detailsSparkline.innerHTML = '<div class="events-empty" style="padding:0.75rem;">Sem histórico suficiente.</div>';
+    return;
+  }
+
+  const maxVal  = Math.max(...ordered.map(l => l.total_ms), 1);
+  const barH    = 52; // px height of the chart area
+
+  const bars = ordered.map(l => {
+    const h   = Math.max(4, Math.round((l.total_ms / maxVal) * barH));
+    const col = getLatencyColor(l.total_ms);
+    const ts  = formatTime(l.timestamp);
+    return `<div class="spark-bar" style="height:${h}px; background:${col};" title="${Math.round(l.total_ms)}ms @ ${ts}"></div>`;
+  }).join('');
+
+  const minMs  = Math.round(Math.min(...ordered.map(l => l.total_ms)));
+  const maxMs  = Math.round(maxVal);
+  const avgMs  = Math.round(ordered.reduce((s, l) => s + l.total_ms, 0) / ordered.length);
+
+  detailsSparkline.innerHTML = `
+    <div class="spark-meta">
+      <span>Mín: <strong style="color:#4dd9a0">${minMs}ms</strong></span>
+      <span>Méd: <strong style="color:#63b3ff">${avgMs}ms</strong></span>
+      <span>Máx: <strong style="color:#f07070">${maxMs}ms</strong></span>
+    </div>
+    <div class="spark-chart">${bars}</div>
+    <div class="spark-axis">
+      <span>← ${ordered.length} checks atrás</span>
+      <span>Agora →</span>
+    </div>`;
 }
 
 async function handleFormSubmit(e) {
@@ -675,6 +835,20 @@ function setWsStatus(state) {
 /* ────────────────────────────────────────────────
    Utilities
 ──────────────────────────────────────────────── */
+function getLatencyColor(ms) {
+  if (ms === null || ms === undefined || ms < 0) return '#607090';
+  if (ms <= 300) return '#4dd9a0';
+  if (ms <= 800) return '#f0b050';
+  return '#f07070';
+}
+
+function hexToRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 function escHtml(str) {
   const d = document.createElement('div');
   d.appendChild(document.createTextNode(str));
@@ -684,7 +858,7 @@ function escHtml(str) {
 function formatTime(iso) {
   try {
     const d = new Date(iso);
-    return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return d.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', second: '2-digit' });
   } catch {
     return '--:--:--';
   }
@@ -711,7 +885,6 @@ function init() {
 
   // Initial load
   fetchDevices();
-  fetchEvents();
 
   // Periodic REST polling (fallback / sync)
   pollTimer = setInterval(fetchDevices, POLL_INTERVAL_MS);
@@ -719,13 +892,17 @@ function init() {
   // WebSocket real-time
   connectWS();
 
-  // Render empty events
-  renderEvents();
-
   // Button bindings
   btnAdd?.addEventListener('click', openModal);
   btnModalCancel?.addEventListener('click', closeModal);
   btnDetailsClose?.addEventListener('click', closeDetailsModal);
+  $('btn-details-close-footer')?.addEventListener('click', closeDetailsModal);
+  $('btn-details-reload')?.addEventListener('click', () => refreshDeviceDetails(false));
+  $('btn-details-download-pdf')?.addEventListener('click', () => {
+    if (currentDetailsDeviceId) {
+      window.location.href = `${API_BASE}/api/devices/${currentDetailsDeviceId}/report/pdf`;
+    }
+  });
   formDevice?.addEventListener('submit', handleFormSubmit);
   btnSilenciar?.addEventListener('click', silenciarAlerta);
 

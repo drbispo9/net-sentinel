@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="NetSentinel Visual — Painel de monitoramento distribuído de dispositivos em tempo real.">
-  <title>NetSentinel Visual — Dashboard</title>
+  <meta name="description" content="NetSentinel — Painel de monitoramento distribuído de dispositivos em tempo real.">
+  <title>NetSentinel — Dashboard</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -17,7 +17,7 @@
     <header>
       <div class="logo-container">
         <div class="pulse-indicator status-up" id="global-pulse"></div>
-        <h1>NetSentinel <span class="badge">Visual</span></h1>
+        <h1>NetSentinel</h1>
       </div>
 
       <div class="controls">
@@ -95,21 +95,6 @@
         </div>
       </div>
 
-      <!-- Event Log Section -->
-      <div class="section-header">
-        <span class="section-title">Log de eventos</span>
-      </div>
-
-      <div class="events-panel">
-        <div class="events-header">
-          <span class="events-title">Histórico de mudanças de status</span>
-          <span style="font-size:0.72rem;color:var(--color-text-muted)">Últimos 50 eventos desta sessão</span>
-        </div>
-        <div class="events-list" id="events-list">
-          <div class="events-empty">Aguardando eventos...</div>
-        </div>
-      </div>
-
     </main>
   </div>
 
@@ -180,32 +165,80 @@
   </div>
 
   <!-- ── Device Details Modal ── -->
-  <div class="modal-overlay" id="modal-details-overlay" role="dialog" aria-modal="true">
-    <div class="modal">
-      <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:0.5rem;">
-        <h2 class="modal-title" id="details-name" style="margin-bottom:0;">Carregando...</h2>
-        <span id="details-status-badge" class="card-status-badge">...</span>
-      </div>
-      <p id="details-address" class="card-address" style="margin-bottom:1.5rem;"></p>
+  <div class="modal-overlay" id="modal-details-overlay" role="dialog" aria-modal="true" aria-labelledby="details-name">
+    <div class="modal modal-details-wide">
 
-      <div class="details-grid">
-        <div class="stat-box" style="background:var(--color-surface); padding:1rem; border-radius:var(--radius-md); border:1px solid var(--color-border);">
+      <!-- Header -->
+      <div class="details-header">
+        <div class="details-header-left">
+          <h2 class="modal-title" id="details-name" style="margin-bottom:0;">Carregando...</h2>
+          <p id="details-address" class="card-address" style="margin-top:4px;"></p>
+        </div>
+        <div class="details-header-right" style="display: flex; align-items: center; gap: 8px;">
+          <span id="details-status-badge" class="card-status-badge">...</span>
+          <button type="button" class="btn ghost btn-icon-close" id="btn-details-reload" title="Atualizar Dados" style="padding: 6px; display: flex; align-items: center; justify-content: center;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M23 4v6h-6"></path>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+            </svg>
+          </button>
+          <button type="button" class="btn ghost btn-icon-close" id="btn-details-close" title="Fechar">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Stats Row -->
+      <div class="details-stats-row">
+        <div class="details-stat-box">
           <span class="stat-label">Uptime Estimado</span>
           <strong class="stat-value" id="details-uptime" style="font-size:1.4rem;">--%</strong>
         </div>
-        <div class="stat-box" style="background:var(--color-surface); padding:1rem; border-radius:var(--radius-md); border:1px solid var(--color-border);">
+        <div class="details-stat-box">
           <span class="stat-label">Última Mudança</span>
-          <strong class="stat-value" id="details-last-change" style="font-size:1.1rem; line-height:1.2; margin-top:4px;">--</strong>
+          <strong class="stat-value" id="details-last-change" style="font-size:1rem; line-height:1.3; margin-top:4px;">--</strong>
+        </div>
+        <div class="details-stat-box" id="details-total-ms-box" style="display:none;">
+          <span class="stat-label">Tempo Total (último)</span>
+          <strong class="stat-value text-success" id="details-total-ms" style="font-size:1.4rem;">--ms</strong>
         </div>
       </div>
 
-      <h3 style="font-size:0.75rem; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:0.5rem; margin-top:1.5rem;">Eventos Recentes (Este Dispositivo)</h3>
-      <div class="events-list" id="details-events-list" style="max-height:180px; background:var(--color-surface); border:1px solid var(--color-border); border-radius:var(--radius-md);">
+      <!-- L7 Performance Breakdown (WEB only) -->
+      <div id="details-l7-section" style="display:none;">
+        <div class="details-section-label">
+          <span>Breakdown de Performance L7</span>
+          <span id="details-l7-timestamp" class="details-section-sub"></span>
+        </div>
+        <div id="details-l7-chart" class="l7-chart">
+          <div class="l7-loading">
+            <div class="spinner" style="width:20px;height:20px;"></div>
+          </div>
+        </div>
+
+        <!-- Latency History Sparkline -->
+        <div class="details-section-label" style="margin-top:1.25rem;">
+          <span>Histórico de Latência Total (últimos 20 checks)</span>
+        </div>
+        <div id="details-sparkline" class="l7-sparkline-container">
+          <div class="l7-loading"><div class="spinner" style="width:16px;height:16px;"></div></div>
+        </div>
+      </div>
+
+      <!-- Recent Events -->
+      <div class="details-section-label" style="margin-top:1.25rem;">
+        <span>Eventos Recentes (Este Dispositivo)</span>
+      </div>
+      <div class="events-list" id="details-events-list" style="max-height:160px; background:var(--color-surface); border:1px solid var(--color-border); border-radius:var(--radius-md);">
         <div class="events-empty">Carregando...</div>
       </div>
 
-      <div class="modal-footer">
-        <button type="button" class="btn ghost" id="btn-details-close">Fechar</button>
+      <div class="modal-footer" style="margin-top:1.25rem; display:flex; justify-content:space-between; align-items:center;">
+        <button type="button" class="btn primary" id="btn-details-download-pdf" style="display:flex; align-items:center; gap:6px;">
+          <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+          Baixar Relatório (PDF)
+        </button>
+        <button type="button" class="btn ghost" id="btn-details-close-footer">Fechar</button>
       </div>
     </div>
   </div>

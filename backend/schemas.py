@@ -11,6 +11,7 @@ class DeviceCreate(BaseModel):
     comunidade_snmp: Optional[str] = None
     versao_snmp: Optional[str] = "v2c"
     oid_cpu: Optional[str] = None
+    slug_identificador: Optional[str] = None
 
 class DeviceUpdate(BaseModel):
     name: Optional[str] = None
@@ -20,6 +21,7 @@ class DeviceUpdate(BaseModel):
     comunidade_snmp: Optional[str] = None
     versao_snmp: Optional[str] = None
     oid_cpu: Optional[str] = None
+    slug_identificador: Optional[str] = None
 
 class DeviceResponse(BaseModel):
     id: int
@@ -29,11 +31,14 @@ class DeviceResponse(BaseModel):
     status: str
     is_muted: bool
     failure_count: int
+    response_time_ms: Optional[int] = None
+    dns_ms: Optional[float] = None
     comunidade_snmp: Optional[str] = None
     versao_snmp: Optional[str] = None
     oid_cpu: Optional[str] = None
     ultimo_uso_cpu: Optional[float] = None
     status_portas: Optional[str] = None
+    slug_identificador: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -54,3 +59,18 @@ class DeviceStatsResponse(BaseModel):
     uptime_percentage: float
     last_status_change: Optional[datetime] = None
     recent_events: List[EventLogResponse]
+
+
+class PerformanceLogResponse(BaseModel):
+    id: int
+    device_id: int
+    dns_ms: Optional[float] = None
+    connect_ms: Optional[float] = None
+    ssl_ms: Optional[float] = None
+    ttfb_ms: Optional[float] = None
+    download_ms: Optional[float] = None
+    total_ms: Optional[float] = None
+    timestamp: datetime
+
+    class Config:
+        from_attributes = True
