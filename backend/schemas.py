@@ -12,6 +12,8 @@ class DeviceCreate(BaseModel):
     versao_snmp: Optional[str] = "v2c"
     oid_cpu: Optional[str] = None
     slug_identificador: Optional[str] = None
+    validar_texto: Optional[bool] = False
+    texto_obrigatorio: Optional[str] = None
 
 class DeviceUpdate(BaseModel):
     name: Optional[str] = None
@@ -22,6 +24,8 @@ class DeviceUpdate(BaseModel):
     versao_snmp: Optional[str] = None
     oid_cpu: Optional[str] = None
     slug_identificador: Optional[str] = None
+    validar_texto: Optional[bool] = None
+    texto_obrigatorio: Optional[str] = None
 
 class DeviceResponse(BaseModel):
     id: int
@@ -39,13 +43,16 @@ class DeviceResponse(BaseModel):
     ultimo_uso_cpu: Optional[float] = None
     status_portas: Optional[str] = None
     slug_identificador: Optional[str] = None
+    validar_texto: bool = False
+    texto_obrigatorio: Optional[str] = None
 
     class Config:
         from_attributes = True
 
 class EventLogResponse(BaseModel):
     id: int
-    device_id: int
+    device_id: Optional[int] = None
+    db_monitor_id: Optional[int] = None
     device_name: str
     old_status: str
     new_status: str
@@ -71,6 +78,35 @@ class PerformanceLogResponse(BaseModel):
     download_ms: Optional[float] = None
     total_ms: Optional[float] = None
     timestamp: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ─── Database Monitor schemas ────────────────────────────────────────────────
+
+class DBMonitorCreate(BaseModel):
+    nome: str
+    endpoint_url: str
+    is_muted: Optional[bool] = False
+
+
+class DBMonitorUpdate(BaseModel):
+    nome: Optional[str] = None
+    endpoint_url: Optional[str] = None
+    is_muted: Optional[bool] = None
+
+
+class DBMonitorResponse(BaseModel):
+    id: int
+    nome: str
+    endpoint_url: str
+    status: str
+    is_muted: bool
+    ultimo_total_locks: Optional[int] = 0
+    consecutive_lock_count: Optional[int] = 0
+    created_at: datetime
+    updated_at: datetime
 
     class Config:
         from_attributes = True

@@ -6,5 +6,6 @@ asyncpg
 httpx
 websockets
 pydantic-settings
+python-dotenv
 pysnmp
 reportlab

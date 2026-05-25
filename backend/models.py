@@ -40,6 +40,7 @@ class DeviceStatus(str, enum.Enum):
     DOWN = "DOWN"
     WARNING = "WARNING"
     CRITICAL_OVERLOAD = "CRITICAL_OVERLOAD"
+    CRITICAL_LOCK = "CRITICAL_LOCK"
 
 class Device(Base):
     __tablename__ = "devices"
@@ -54,6 +55,10 @@ class Device(Base):
     response_time_ms = Column(Integer, nullable=True, default=None)
     dns_ms = Column(Float, nullable=True, default=None)
     slug_identificador = Column(String(50), nullable=True, index=True, default=None)
+
+    # Keyword Matching (Content Validation)
+    validar_texto = Column(Boolean, default=False)
+    texto_obrigatorio = Column(String, nullable=True)
 
     # SNMP fields
     comunidade_snmp = Column(String, nullable=True)
@@ -70,7 +75,8 @@ class EventLog(Base):
     __tablename__ = "event_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    device_id = Column(Integer, ForeignKey("devices.id"), nullable=False)
+    device_id = Column(Integer, ForeignKey("devices.id"), nullable=True)
+    db_monitor_id = Column(Integer, ForeignKey("database_monitors.id", ondelete="CASCADE"), nullable=True)
     old_status = Column(String, nullable=False)
     new_status = Column(String, nullable=False)
     latency = Column(Float, nullable=True)  # in milliseconds
@@ -93,3 +99,19 @@ class PerformanceLog(Base):
     total_ms    = Column(Float, nullable=True)   # End-to-end total
 
     timestamp   = Column(TZDateTime(timezone=True), default=get_brasilia_time, index=True)
+
+
+class DatabaseMonitor(Base):
+    """Monitors a database via the Sentinela API (lock detection)."""
+    __tablename__ = "database_monitors"
+
+    id                    = Column(Integer, primary_key=True, index=True)
+    nome                  = Column(String, nullable=False)
+    endpoint_url          = Column(String, nullable=False)
+    status                = Column(String, default="UP")   # UP/DOWN/WARNING/CRITICAL_LOCK
+    is_muted              = Column(Boolean, default=False)
+    ultimo_total_locks    = Column(Integer, default=0, nullable=True)
+    consecutive_lock_count = Column(Integer, default=0)    # rounds with locks > 0 in a row
+
+    created_at  = Column(TZDateTime(timezone=True), default=get_brasilia_time)
+    updated_at  = Column(TZDateTime(timezone=True), default=get_brasilia_time, onupdate=get_brasilia_time)

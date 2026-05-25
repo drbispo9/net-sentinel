@@ -47,6 +47,17 @@
           </svg>
           <span>Adicionar Dispositivo</span>
         </button>
+
+        <!-- Add DB Monitor Button (shown only in DATABASE tab) -->
+        <button id="btn-add-db-monitor" class="btn primary" title="Cadastrar monitor de banco"
+                style="display:none">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5"  y1="12" x2="19" y2="12"></line>
+          </svg>
+          <span>Adicionar Monitor de BD</span>
+        </button>
       </div>
     </header>
 
@@ -62,6 +73,10 @@
         <button class="nav-btn" data-view="HARDWARE">
           <span class="nav-icon">🖥️</span>
           Infraestrutura
+        </button>
+        <button class="nav-btn" data-view="DATABASE" id="btn-tab-database">
+          <span class="nav-icon">🗄️</span>
+          Banco de Dados
         </button>
       </div>
 
@@ -86,6 +101,11 @@
       <!-- Devices Section -->
       <div class="section-header">
         <span class="section-title" id="devices-section-title">Dispositivos web</span>
+      </div>
+
+      <!-- DB Monitor Grid (shown only in DATABASE tab) -->
+      <div id="db-monitor-section" style="display:none">
+        <div class="devices-grid" id="db-monitors-grid"></div>
       </div>
 
       <div class="devices-grid" id="devices-grid">
@@ -153,6 +173,33 @@
           <div class="form-group">
             <label for="input-snmp-oid">OID CPU</label>
             <input type="text" id="input-snmp-oid" placeholder="1.3.6.1.4.1.9.9.109.1.1.1.1.5.1" autocomplete="off">
+          </div>
+        </div>
+
+
+        <!-- Keyword Matching — visible only for WEB devices -->
+        <div id="keyword-section" style="display:none; border-top: 1px solid var(--color-border); padding-top: 1rem; margin-top: 1rem;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.5rem;">
+            <div>
+              <label style="margin:0; font-weight:600; font-size:0.82rem; letter-spacing:0.04em; text-transform:uppercase; color:var(--color-text-muted);">Validação de Conteúdo</label>
+              <p style="margin:2px 0 0; font-size:0.75rem; color:var(--color-text-muted);">Marcar como <strong>DOWN</strong> se o texto não for encontrado no HTML</p>
+            </div>
+            <label class="switch-label" for="input-validar-texto" title="Ativar validação de conteúdo">
+              <input type="checkbox" id="input-validar-texto" role="switch">
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
+          </div>
+          <div id="keyword-input-wrapper" style="display:none;">
+            <div class="form-group" style="margin-bottom:0;">
+              <label for="input-texto-obrigatorio">Texto / Keyword Obrigatório</label>
+              <input
+                type="text"
+                id="input-texto-obrigatorio"
+                placeholder="ex: Bem-vindo, Login, Copyright 2025..."
+                autocomplete="off"
+              >
+              <p style="margin:4px 0 0; font-size:0.72rem; color:var(--color-text-muted);">O site será marcado como DOWN se esse texto não estiver no HTML da resposta.</p>
+            </div>
           </div>
         </div>
 
@@ -247,6 +294,34 @@
   <audio id="audio-alert" loop preload="auto">
     <source src="alerta_critico.wav" type="audio/wav">
   </audio>
+
+  <!-- ── DB Monitor Add/Edit Modal ── -->
+  <div class="modal-overlay" id="modal-db-overlay">
+    <div class="modal" style="max-width:480px">
+      <h2 class="modal-title" id="modal-db-title">Adicionar Monitor de BD</h2>
+      <form id="form-db-monitor">
+        <input type="hidden" id="input-db-id">
+
+        <div class="form-group">
+          <label for="input-db-nome">Nome do Monitor</label>
+          <input id="input-db-nome" type="text"
+                 placeholder="ex: Banco Geral, Sankhya..." required>
+        </div>
+
+        <div class="form-group">
+          <label for="input-db-url">Endpoint Sentinela (URL)</label>
+          <input id="input-db-url" type="url"
+                 placeholder="http://sentinela.oabgo.org.br/locks" required>
+          <p class="form-hint">URL completa do endpoint de locks do Sentinela.</p>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn ghost" id="btn-db-cancel">Cancelar</button>
+          <button type="submit" class="btn primary" id="btn-db-save">Adicionar</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

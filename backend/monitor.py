@@ -2,10 +2,16 @@ import asyncio
 import logging
 import time
 import os
+import warnings
 import httpx
+
+# Suppress SSL verification warnings — intentional for a monitoring tool
+# that checks availability, not certificate validity.
+warnings.filterwarnings("ignore", message=".*Unverified HTTPS.*")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="httpx")
 from sqlalchemy import select
 from .database import AsyncSessionLocal
-from .models import Device, DeviceType, DeviceStatus, EventLog, PerformanceLog
+from .models import Device, DeviceType, DeviceStatus, EventLog, PerformanceLog, DatabaseMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +135,10 @@ class MonitorManager:
             max_connections=1,
             max_keepalive_connections=0,
         )
-        async with httpx.AsyncClient(limits=limits) as client:
+        # verify=False: monitoring checks *availability*, not certificate validity.
+        # Sites with self-signed, expired or corporate-chain SSL certs must not
+        # be falsely reported as DOWN due to SSL verification errors on the server.
+        async with httpx.AsyncClient(limits=limits, verify=False) as client:
             await self._run_web_check(device_id, client)
 
     async def _run_oab_authenticated_check(self, device, client: httpx.AsyncClient, timeout: httpx.Timeout):
@@ -222,6 +231,17 @@ class MonitorManager:
                         elapsed_ms = (time.monotonic() - start) * 1000
 
                         if 200 <= response.status_code < 400:
+                            # ── Keyword Matching (Content Validation) ──────
+                            if device.validar_texto and device.texto_obrigatorio:
+                                if device.texto_obrigatorio not in response.text:
+                                    logger.warning(
+                                        f"[Monitor] {device.name} — Keyword não encontrado: "
+                                        f"'{device.texto_obrigatorio}' ausente no HTML. "
+                                        f"Marcando como DOWN."
+                                    )
+                                    failures = max_attempts  # Force DOWN immediately
+                                    break
+
                             failures = 0
                             response_time_ms = round(elapsed_ms)
                             l7_metrics = _compute_l7_metrics(timings, elapsed_ms)
@@ -480,8 +500,25 @@ class MonitorManager:
         logger.info("[Monitor] Database loop started")
         while self.running:
             try:
-                # TODO: Implement DB query checks directly here
-                pass
+                from .services.database_service import check_database_lock_monitor
+
+                # Reload monitor list dynamically each cycle
+                async with AsyncSessionLocal() as session:
+                    result = await session.execute(select(DatabaseMonitor.id))
+                    monitor_ids = [row[0] for row in result.all()]
+
+                logger.debug(
+                    f"[Monitor] Database cycle — checking {len(monitor_ids)} monitor(s)"
+                )
+
+                if monitor_ids:
+                    tasks = [
+                        check_database_lock_monitor(mid, self.broadcast)
+                        for mid in monitor_ids
+                    ]
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
             except Exception as e:
                 logger.error(f"[Monitor] Database loop error: {e}")
+
             await asyncio.sleep(60)

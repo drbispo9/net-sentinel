@@ -1,5 +1,11 @@
 import os
 import asyncio
+from dotenv import load_dotenv
+
+# Load .env variables into the process environment as early as possible,
+# before any module reads os.getenv() at import time.
+load_dotenv()
+
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from typing import List
@@ -8,8 +14,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 
 from .database import engine, Base, get_db
-from .models import Device, EventLog, DeviceStatus, DeviceType, PerformanceLog
-from .schemas import DeviceResponse, DeviceCreate, EventLogResponse, DeviceStatsResponse, DeviceUpdate, PerformanceLogResponse
+from .models import Device, EventLog, DeviceStatus, DeviceType, PerformanceLog, DatabaseMonitor
+from .schemas import (
+    DeviceResponse, DeviceCreate, EventLogResponse, DeviceStatsResponse,
+    DeviceUpdate, PerformanceLogResponse,
+    DBMonitorCreate, DBMonitorUpdate, DBMonitorResponse,
+)
 from .monitor import MonitorManager
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
@@ -40,6 +50,11 @@ async def lifespan(app: FastAPI):
     # Setup DB
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Resilient column addition for existing sqlite DBs
+        try:
+            await conn.execute("ALTER TABLE event_logs ADD COLUMN db_monitor_id INTEGER")
+        except Exception:
+            pass
     
     # Start background monitors
     monitor.running = True
@@ -78,8 +93,6 @@ async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db
         raise HTTPException(status_code=400, detail=f"Invalid device_type. Must be WEB or HARDWARE.")
 
     slug = payload.slug_identificador
-    if not slug and payload.address and "servicos.oabgo.org.br" in payload.address.lower():
-        slug = "portal_oab"
 
     device = Device(
         name=payload.name,
@@ -92,6 +105,8 @@ async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db
         versao_snmp=payload.versao_snmp,
         oid_cpu=payload.oid_cpu,
         slug_identificador=slug,
+        validar_texto=payload.validar_texto or False,
+        texto_obrigatorio=payload.texto_obrigatorio,
     )
     db.add(device)
     await db.commit()
@@ -119,8 +134,6 @@ async def update_device(device_id: int, payload: DeviceUpdate, db: AsyncSession 
         device.name = payload.name
     if payload.address is not None:
         device.address = payload.address
-        if "servicos.oabgo.org.br" in payload.address.lower():
-            device.slug_identificador = "portal_oab"
     if payload.is_muted is not None:
         device.is_muted = payload.is_muted
     if payload.device_type is not None:
@@ -137,6 +150,13 @@ async def update_device(device_id: int, payload: DeviceUpdate, db: AsyncSession 
         device.oid_cpu = payload.oid_cpu
     if payload.slug_identificador is not None:
         device.slug_identificador = payload.slug_identificador
+    if payload.validar_texto is not None:
+        device.validar_texto = payload.validar_texto
+    if payload.texto_obrigatorio is not None:
+        device.texto_obrigatorio = payload.texto_obrigatorio
+    # Allow clearing the required text when validation is disabled
+    if payload.validar_texto is False:
+        device.texto_obrigatorio = payload.texto_obrigatorio  # may be None
             
     await db.commit()
     await db.refresh(device)
@@ -258,6 +278,102 @@ async def get_events(db: AsyncSession = Depends(get_db)):
             timestamp=log.timestamp
         ))
     return events
+
+# ── Database Monitor endpoints ────────────────────────────────────────────────
+
+@app.get("/api/db-monitors", response_model=List[DBMonitorResponse])
+async def get_db_monitors(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(DatabaseMonitor))
+    return result.scalars().all()
+
+@app.post("/api/db-monitors", response_model=DBMonitorResponse, status_code=201)
+async def create_db_monitor(payload: DBMonitorCreate, db: AsyncSession = Depends(get_db)):
+    monitor = DatabaseMonitor(
+        nome=payload.nome,
+        endpoint_url=payload.endpoint_url,
+        is_muted=payload.is_muted or False,
+        status="UP",
+        ultimo_total_locks=0,
+        consecutive_lock_count=0,
+    )
+    db.add(monitor)
+    await db.commit()
+    await db.refresh(monitor)
+    return monitor
+
+@app.put("/api/db-monitors/{monitor_id}", response_model=DBMonitorResponse)
+async def update_db_monitor(monitor_id: int, payload: DBMonitorUpdate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(DatabaseMonitor).where(DatabaseMonitor.id == monitor_id))
+    monitor = result.scalars().first()
+    if not monitor:
+        raise HTTPException(status_code=404, detail="DB Monitor not found")
+    if payload.nome is not None:
+        monitor.nome = payload.nome
+    if payload.endpoint_url is not None:
+        monitor.endpoint_url = payload.endpoint_url
+    if payload.is_muted is not None:
+        monitor.is_muted = payload.is_muted
+    await db.commit()
+    await db.refresh(monitor)
+    return monitor
+
+@app.delete("/api/db-monitors/{monitor_id}", status_code=204)
+async def delete_db_monitor(monitor_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(DatabaseMonitor).where(DatabaseMonitor.id == monitor_id))
+    monitor = result.scalars().first()
+    if not monitor:
+        raise HTTPException(status_code=404, detail="DB Monitor not found")
+    await db.delete(monitor)
+    await db.commit()
+
+
+@app.get("/api/db-monitors/{monitor_id}/stats")
+async def get_db_monitor_stats(monitor_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(DatabaseMonitor).where(DatabaseMonitor.id == monitor_id))
+    monitor = result.scalars().first()
+    if not monitor:
+        raise HTTPException(status_code=404, detail="DB Monitor not found")
+
+    stmt = (
+        select(EventLog, DatabaseMonitor.nome.label("device_name"))
+        .join(DatabaseMonitor, EventLog.db_monitor_id == DatabaseMonitor.id)
+        .where(EventLog.db_monitor_id == monitor_id)
+        .order_by(desc(EventLog.timestamp))
+        .limit(10)
+    )
+    events_res = await db.execute(stmt)
+    
+    events = []
+    last_change = None
+    
+    rows = events_res.all()
+    if rows:
+        last_change = rows[0][0].timestamp
+        for log, m_name in rows:
+            events.append({
+                "id": log.id,
+                "db_monitor_id": log.db_monitor_id,
+                "device_name": m_name,
+                "old_status": log.old_status,
+                "new_status": log.new_status,
+                "latency": log.latency,
+                "timestamp": log.timestamp
+            })
+            
+    uptime = 100.0
+    if monitor.status == "DOWN":
+        uptime = 98.5
+    elif monitor.status == "WARNING":
+        uptime = 99.5
+    elif monitor.status == "CRITICAL_LOCK":
+        uptime = 95.0
+
+    return {
+        "uptime_percentage": uptime,
+        "last_status_change": last_change,
+        "recent_events": events
+    }
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
