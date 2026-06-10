@@ -1,0 +1,33 @@
+# Mantém o contexto de build pequeno e evita copiar segredos/artefatos.
+.git/
+.gitignore
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Segredos e banco local (NÃO vão para a imagem)
+.env
+*.db
+*.db-wal
+*.db-shm
+
+# Desktop / Node (fora do escopo do container de servidor)
+electron/
+node_modules/
+dist/
+
+# Ferramentas e IDE
+.claude/
+.agents/
+.gemini/
+.vscode/
+.idea/
+
+# Testes e docs (não necessários em runtime)
+tests/
+README.md

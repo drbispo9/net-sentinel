@@ -44,10 +44,48 @@ Monitotamento/
 
 ## 🚀 Como Rodar
 
+Há dois caminhos: **(A) tudo em Docker** (recomendado — não precisa de Python
+nem dependências na máquina) ou **(B) backend no host** com o Postgres em Docker.
+
+---
+
+## 🐳 Opção A — Tudo em Docker (recomendado)
+
+Sobe **backend (API + frontend) + PostgreSQL** com um comando.
+
+```bash
+git clone https://github.com/drbispo9/net-sentinel.git
+cd net-sentinel
+
+cp .env.example .env          # edite e defina ao menos POSTGRES_PASSWORD
+docker compose up -d --build  # builda a imagem e sobe todo o stack
+```
+
+Acesse **http://localhost:8000**. As tabelas são criadas automaticamente no
+primeiro start.
+
+| Ação | Comando |
+|---|---|
+| Ver logs do backend | `docker compose logs -f backend` |
+| Parar (mantém dados) | `docker compose down` |
+| Parar e **apagar** dados | `docker compose down -v` |
+| Rebuildar após mudar código | `docker compose up -d --build` |
+
+> O serviço `backend` recebe as variáveis do `.env` (via `env_file`) e usa o host
+> `postgres` (nome do serviço) para falar com o banco. O `ping` do monitor de
+> hardware funciona graças à capability `NET_RAW` declarada no compose.
+>
+> Já tem um `netsentinel.db` (SQLite) com dados? Veja como importá-lo na seção
+> **Opção B** abaixo (a migração roda a partir do host, onde o arquivo `.db` está).
+
+---
+
+## 💻 Opção B — Backend no host (Postgres em Docker)
+
 ### 1. Clone o repositório
 ```bash
-git clone https://github.com/SEU_USUARIO/Monitotamento.git
-cd Monitotamento
+git clone https://github.com/drbispo9/net-sentinel.git
+cd net-sentinel
 ```
 
 ### 2. Crie o ambiente virtual
