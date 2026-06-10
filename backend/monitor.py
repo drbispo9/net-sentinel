@@ -1,7 +1,10 @@
 import asyncio
+import html as _html
 import logging
+import re
 import time
 import os
+import ssl
 import warnings
 import httpx
 
@@ -12,8 +15,97 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="httpx")
 from sqlalchemy import select
 from .database import AsyncSessionLocal
 from .models import Device, DeviceType, DeviceStatus, EventLog, PerformanceLog, DatabaseMonitor
+from .services.maintenance_service import (
+    load_active_window_candidates,
+    is_target_under_maintenance,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HTTP headers / Keyword matching
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Headers de navegador real — sem isso, muitos sites (Cloudflare, WAFs, CDNs,
+# Wix, GoDaddy, etc.) servem HTML diferente, página de erro ou bloqueio para
+# o User-Agent default do httpx ("python-httpx/0.x"), o que quebrava o keyword
+# matching em sites perfeitamente acessíveis no navegador.
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+    # IMPORTANTE: NÃO anunciar brotli (`br`) — o httpx só descomprime gzip e
+    # deflate nativamente, então CDNs (Cloudflare etc.) entregavam o corpo em
+    # brotli e o keyword matching quebrava (response.text vinha embaralhada).
+    "Accept-Encoding": "gzip, deflate",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
+
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_for_match(text: str) -> str:
+    """
+    Normaliza texto para comparação tolerante:
+      - Decodifica entidades HTML (&amp; → &, &nbsp; → espaço, etc).
+      - Colapsa qualquer sequência de espaços/quebras/tabs em um único espaço.
+      - Tira espaços nas pontas.
+      - Converte para caixa baixa (case-insensitive).
+    """
+    if not text:
+        return ""
+    decoded = _html.unescape(text)
+    collapsed = _WHITESPACE_RE.sub(" ", decoded).strip()
+    return collapsed.lower()
+
+
+def _decode_response_text(response: httpx.Response) -> str:
+    """
+    Retorna o corpo da resposta como string, robusto contra encodings ruins.
+
+    httpx.Response.text já faz detecção de charset, mas alguns sites mandam
+    Content-Type sem charset e/ou meta tags inconsistentes, gerando mojibake
+    que esconde o keyword. Aqui caímos para utf-8 com errors='replace' quando
+    necessário, garantindo que o texto chegue ao normalizador sem exceções.
+    """
+    try:
+        text = response.text
+        if text:
+            return text
+    except Exception:
+        pass
+    try:
+        return response.content.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _keyword_matches(html_text: str, keyword: str | None) -> bool:
+    """
+    Verdadeiro se `keyword` está presente em `html_text` de forma tolerante:
+      - Espaços/quebras de linha colapsados.
+      - Entidades HTML decodificadas.
+      - Comparação case-insensitive.
+
+    Keyword vazia/None retorna True (nada a validar).
+    """
+    if keyword is None:
+        return True
+    needle = _normalize_for_match(keyword)
+    if not needle:
+        return True
+    haystack = _normalize_for_match(html_text)
+    return needle in haystack
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,6 +204,27 @@ def _compute_l7_metrics(timings: dict, total_elapsed_ms: float) -> dict:
     }
 
 
+def _is_ssl_error(exc: BaseException) -> bool:
+    """
+    Detecta se a exceção foi causada por um problema de certificado SSL
+    (expirado, hostname inválido, cadeia não confiável, etc).
+
+    httpx encapsula o erro em ConnectError, então percorremos a cadeia de
+    causas procurando por ssl.SSLError / ssl.SSLCertVerificationError.
+    """
+    seen: set[int] = set()
+    e: BaseException | None = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if isinstance(e, ssl.SSLError):
+            return True
+        e = e.__cause__ or e.__context__
+
+    # Fallback por mensagem (cobre wrappers que não preservam a causa).
+    msg = str(exc).lower()
+    return "certificate verify failed" in msg or "ssl: " in msg or "sslerror" in msg
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MonitorManager
 # ─────────────────────────────────────────────────────────────────────────────
@@ -125,21 +238,29 @@ class MonitorManager:
 
     async def _check_web_device(self, device_id: int):
         """Check a single web device, collect L7 timings, and persist results.
-        
+
         Each call creates its own httpx.AsyncClient with keepalive disabled so
         the TCP connection is always fresh and connect_tcp trace events always fire,
         giving us accurate DNS+TCP timing on every check.
+
+        Two clients são criados:
+          - secure (verify=True): usado primeiro; detecta certificado inválido.
+          - insecure (verify=False): fallback quando o certificado falha, para
+            confirmar que o site está *disponível* mesmo com cert problemático
+            (nesse caso o status vira WARNING, não DOWN).
         """
-        # Fresh client per check — no connection reuse, guarantees trace hooks fire
+        # Fresh clients per check — no connection reuse, guarantees trace hooks fire.
+        # `headers=_BROWSER_HEADERS` é crítico para keyword matching: muitos sites
+        # respondem com HTML diferente (ou bloqueio) ao User-Agent default do httpx.
         limits = httpx.Limits(
             max_connections=1,
             max_keepalive_connections=0,
         )
-        # verify=False: monitoring checks *availability*, not certificate validity.
-        # Sites with self-signed, expired or corporate-chain SSL certs must not
-        # be falsely reported as DOWN due to SSL verification errors on the server.
-        async with httpx.AsyncClient(limits=limits, verify=False) as client:
-            await self._run_web_check(device_id, client)
+        async with httpx.AsyncClient(limits=limits, verify=True,
+                                     headers=_BROWSER_HEADERS) as secure_client, \
+                   httpx.AsyncClient(limits=limits, verify=False,
+                                     headers=_BROWSER_HEADERS) as insecure_client:
+            await self._run_web_check(device_id, secure_client, insecure_client)
 
     async def _run_oab_authenticated_check(self, device, client: httpx.AsyncClient, timeout: httpx.Timeout):
         """Runs the custom OAB authenticated L7 check and returns (response_time_ms, l7_metrics) or raises Exception."""
@@ -190,6 +311,15 @@ class MonitorManager:
         if response.status_code != 200:
             raise ValueError(f"Validação da página interna falhou com status HTTP {response.status_code}")
 
+        # Keyword Matching também se aplica ao fluxo autenticado.
+        keyword = (device.texto_obrigatorio or "").strip()
+        if device.validar_texto and keyword:
+            body = _decode_response_text(response)
+            if not _keyword_matches(body, keyword):
+                raise ValueError(
+                    f"Validação de conteúdo falhou: '{keyword}' ausente na resposta autenticada"
+                )
+
         response_time_ms = round(elapsed_ms)
         l7_metrics = _compute_l7_metrics(timings, elapsed_ms)
 
@@ -199,7 +329,8 @@ class MonitorManager:
 
         return response_time_ms, l7_metrics
 
-    async def _run_web_check(self, device_id: int, client: httpx.AsyncClient):
+    async def _run_web_check(self, device_id: int, secure_client: httpx.AsyncClient,
+                             insecure_client: httpx.AsyncClient):
         """Inner implementation — runs the actual HTTP check and persists L7 metrics."""
         async with AsyncSessionLocal() as session:
             device = await session.get(Device, device_id)
@@ -211,49 +342,94 @@ class MonitorManager:
             timeout = httpx.Timeout(10.0)
             response_time_ms = None
             l7_metrics = None
+            ssl_invalid = False  # site disponível, mas certificado SSL problemático
 
             for attempt in range(1, max_attempts + 1):
                 try:
                     if device.slug_identificador == "portal_oab":
-                        response_time_ms, l7_metrics = await self._run_oab_authenticated_check(device, client, timeout)
+                        # Check interno autenticado — usa o cliente não-verificado.
+                        response_time_ms, l7_metrics = await self._run_oab_authenticated_check(device, insecure_client, timeout)
                         failures = 0
                         logger.debug(f"[Monitor] {device.name} (OAB Authenticated) check succeeded.")
                         break
                     else:
                         timings: dict = {}
+                        ssl_invalid_attempt = False
+
+                        # 1ª tentativa: COM verificação de certificado.
                         start = time.monotonic()
-                        response = await client.get(
-                            device.address,
-                            timeout=timeout,
-                            follow_redirects=True,
-                            extensions={"trace": _build_trace_callback(timings)},
-                        )
-                        elapsed_ms = (time.monotonic() - start) * 1000
+                        try:
+                            response = await secure_client.get(
+                                device.address,
+                                timeout=timeout,
+                                follow_redirects=True,
+                                extensions={"trace": _build_trace_callback(timings)},
+                            )
+                            elapsed_ms = (time.monotonic() - start) * 1000
+                        except Exception as exc:
+                            # Certificado inválido? Confirma disponibilidade ignorando SSL.
+                            if _is_ssl_error(exc):
+                                logger.warning(
+                                    f"[Monitor] {device.name} — Certificado SSL inválido/expirado. "
+                                    f"Verificando disponibilidade sem validar o certificado."
+                                )
+                                ssl_invalid_attempt = True
+                                timings = {}
+                                start = time.monotonic()
+                                response = await insecure_client.get(
+                                    device.address,
+                                    timeout=timeout,
+                                    follow_redirects=True,
+                                    extensions={"trace": _build_trace_callback(timings)},
+                                )
+                                elapsed_ms = (time.monotonic() - start) * 1000
+                            else:
+                                raise  # erro não-SSL → tratado como falha abaixo
 
                         if 200 <= response.status_code < 400:
                             # ── Keyword Matching (Content Validation) ──────
-                            if device.validar_texto and device.texto_obrigatorio:
-                                if device.texto_obrigatorio not in response.text:
+                            # Falha de keyword conta como UMA falha — retentamos
+                            # como qualquer outro erro transitório (render lento,
+                            # SPA hidratando, conteúdo dinâmico) antes de derrubar.
+                            keyword = (device.texto_obrigatorio or "").strip()
+                            if device.validar_texto and keyword:
+                                body = _decode_response_text(response)
+                                if not _keyword_matches(body, keyword):
                                     logger.warning(
-                                        f"[Monitor] {device.name} — Keyword não encontrado: "
-                                        f"'{device.texto_obrigatorio}' ausente no HTML. "
-                                        f"Marcando como DOWN."
+                                        f"[Monitor] {device.name} — Keyword '{keyword}' "
+                                        f"ausente no HTML (tentativa {attempt}/{max_attempts}). "
+                                        f"Status HTTP {response.status_code}, tamanho={len(body)}b."
                                     )
-                                    failures = max_attempts  # Force DOWN immediately
+                                    failures += 1
+                                    # cai para o sleep+retry abaixo
+                                else:
+                                    failures = 0
+                                    ssl_invalid = ssl_invalid_attempt
+                                    response_time_ms = round(elapsed_ms)
+                                    l7_metrics = _compute_l7_metrics(timings, elapsed_ms)
+                                    logger.debug(
+                                        f"[Monitor] {device.name} keyword OK + L7 timings: "
+                                        f"dns={l7_metrics.get('dns_ms')}ms "
+                                        f"ssl={l7_metrics.get('ssl_ms')}ms "
+                                        f"ttfb={l7_metrics.get('ttfb_ms')}ms "
+                                        f"dl={l7_metrics.get('download_ms')}ms "
+                                        f"total={l7_metrics.get('total_ms')}ms"
+                                    )
                                     break
-
-                            failures = 0
-                            response_time_ms = round(elapsed_ms)
-                            l7_metrics = _compute_l7_metrics(timings, elapsed_ms)
-                            logger.debug(
-                                f"[Monitor] {device.name} L7 timings: "
-                                f"dns={l7_metrics.get('dns_ms')}ms "
-                                f"ssl={l7_metrics.get('ssl_ms')}ms "
-                                f"ttfb={l7_metrics.get('ttfb_ms')}ms "
-                                f"dl={l7_metrics.get('download_ms')}ms "
-                                f"total={l7_metrics.get('total_ms')}ms"
-                            )
-                            break
+                            else:
+                                failures = 0
+                                ssl_invalid = ssl_invalid_attempt
+                                response_time_ms = round(elapsed_ms)
+                                l7_metrics = _compute_l7_metrics(timings, elapsed_ms)
+                                logger.debug(
+                                    f"[Monitor] {device.name} L7 timings: "
+                                    f"dns={l7_metrics.get('dns_ms')}ms "
+                                    f"ssl={l7_metrics.get('ssl_ms')}ms "
+                                    f"ttfb={l7_metrics.get('ttfb_ms')}ms "
+                                    f"dl={l7_metrics.get('download_ms')}ms "
+                                    f"total={l7_metrics.get('total_ms')}ms"
+                                )
+                                break
                         else:
                             failures += 1
 
@@ -265,7 +441,12 @@ class MonitorManager:
                     await asyncio.sleep(5)
 
             # ── Determine status ──────────────────────────────────────────────
-            new_status = DeviceStatus.DOWN if failures >= max_attempts else DeviceStatus.UP
+            if failures >= max_attempts:
+                new_status = DeviceStatus.DOWN
+            elif ssl_invalid:
+                new_status = DeviceStatus.WARNING  # disponível, mas certificado inválido
+            else:
+                new_status = DeviceStatus.UP
             if new_status == DeviceStatus.DOWN:
                 response_time_ms = None
                 l7_metrics = None
@@ -296,7 +477,17 @@ class MonitorManager:
                 session.add(event_log)
                 await session.commit()
 
-                logger.info(f"[Monitor] {device.name}: {old_status.value} → {new_status.value}")
+                # Janela de manutenção ativa? Suprime som/popup/notificação,
+                # mas o status muda visualmente como sempre.
+                windows = await load_active_window_candidates(session)
+                muted_by_maintenance = is_target_under_maintenance(
+                    windows, device_id=device.id
+                )
+
+                logger.info(
+                    f"[Monitor] {device.name}: {old_status.value} → {new_status.value}"
+                    + (" [maintenance window]" if muted_by_maintenance else "")
+                )
 
                 # Status-change alert broadcast (high priority — carries status info)
                 await self.broadcast({
@@ -306,6 +497,7 @@ class MonitorManager:
                     "device_name": device.name,
                     "status": new_status.value,
                     "is_muted": device.is_muted,
+                    "muted_by_maintenance": muted_by_maintenance,
                     "response_time_ms": response_time_ms,
                     "dns_ms": device.dns_ms,
                 })
@@ -448,7 +640,15 @@ class MonitorManager:
                 session.add(log)
                 await session.commit()
 
-                logger.info(f"[Monitor] {device.name}: {old_status.value} → {new_status.value}")
+                windows = await load_active_window_candidates(session)
+                muted_by_maintenance = is_target_under_maintenance(
+                    windows, device_id=device.id
+                )
+
+                logger.info(
+                    f"[Monitor] {device.name}: {old_status.value} → {new_status.value}"
+                    + (" [maintenance window]" if muted_by_maintenance else "")
+                )
 
                 await self.broadcast({
                     "type": "status_change",
@@ -459,6 +659,7 @@ class MonitorManager:
                     "device_name": device.name,
                     "status": new_status.value,
                     "is_muted": device.is_muted,
+                    "muted_by_maintenance": muted_by_maintenance,
                 })
             else:
                 await session.commit()
@@ -497,7 +698,10 @@ class MonitorManager:
             await asyncio.sleep(3)
 
     async def monitor_database_loop(self):
-        logger.info("[Monitor] Database loop started")
+        # Intervalo configurável — locks são sensíveis ao tempo, então o padrão
+        # (30s) é mais agressivo que os 60s antigos. Ajuste via env se necessário.
+        interval = max(5, int(os.getenv("DB_MONITOR_INTERVAL_SECONDS", "30")))
+        logger.info(f"[Monitor] Database loop started (intervalo: {interval}s)")
         while self.running:
             try:
                 from .services.database_service import check_database_lock_monitor
@@ -521,4 +725,4 @@ class MonitorManager:
             except Exception as e:
                 logger.error(f"[Monitor] Database loop error: {e}")
 
-            await asyncio.sleep(60)
+            await asyncio.sleep(interval)

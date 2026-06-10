@@ -38,6 +38,26 @@
           <span>Silenciar</span>
         </button>
 
+        <!-- Global Alert Sound Toggle (synced to all clients, incl. Electron) -->
+        <button id="btn-sound-toggle" class="btn ghost" title="Som de alerta — aplica a todos os clientes (inclusive a tela do Electron)">
+          <svg id="sound-toggle-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+          </svg>
+          <span id="sound-toggle-label">Som: ligado</span>
+        </button>
+
+        <!-- Maintenance Windows Button -->
+        <button id="btn-maintenance" class="btn ghost" title="Janelas de manutenção programada">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
+          </svg>
+          <span>Manutenção</span>
+        </button>
+
         <!-- Add Device Button -->
         <button id="btn-add-device" class="btn primary" title="Cadastrar novo dispositivo">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
@@ -106,6 +126,40 @@
       <!-- DB Monitor Grid (shown only in DATABASE tab) -->
       <div id="db-monitor-section" style="display:none">
         <div class="devices-grid" id="db-monitors-grid"></div>
+      </div>
+
+      <!-- ── Network Discovery (HARDWARE tab only) ── -->
+      <div id="discovery-section" style="display:none">
+        <div class="discovery-panel">
+          <div class="discovery-header">
+            <div>
+              <span class="discovery-title">🔍 Descoberta de dispositivos</span>
+              <p class="discovery-hint">Varredura ativa de switches, roteadores, firewalls e access points no range informado. Equipamentos descobertos podem ser adicionados ao monitoramento.</p>
+            </div>
+          </div>
+
+          <div class="discovery-controls">
+            <input id="network-range" type="text" placeholder="ex: 192.168.1.0/24" autocomplete="off" />
+            <button id="btn-detect-range" type="button" class="btn ghost">Detectar</button>
+            <button id="btn-start-scan" type="button" class="btn primary">Iniciar varredura</button>
+          </div>
+
+          <div class="discovery-progress" id="discovery-progress" style="display:none">
+            <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+            <div class="progress-meta">
+              <span id="progress-label">0 / 0</span>
+              <span id="progress-found">0 dispositivos encontrados</span>
+            </div>
+          </div>
+
+          <div id="discovery-results" class="discovery-results"></div>
+
+          <div id="discovery-actions" class="discovery-actions" style="display:none">
+            <button id="btn-select-all" type="button" class="btn ghost">Selecionar todos</button>
+            <button id="btn-add-selected" type="button" class="btn primary">Adicionar selecionados</button>
+            <button id="btn-clear-discovery" type="button" class="btn ghost">Limpar lista</button>
+          </div>
+        </div>
       </div>
 
       <div class="devices-grid" id="devices-grid">
@@ -251,6 +305,13 @@
         </div>
       </div>
 
+      <!-- Keyword Validation Info (WEB only, when active) -->
+      <div id="details-keyword-section" class="details-keyword" style="display:none;">
+        <span class="details-keyword-tag">Texto exigido</span>
+        <span class="details-keyword-arrow" aria-hidden="true">→</span>
+        <code id="details-keyword-text" class="details-keyword-value">--</code>
+      </div>
+
       <!-- L7 Performance Breakdown (WEB only) -->
       <div id="details-l7-section" style="display:none;">
         <div class="details-section-label">
@@ -320,6 +381,95 @@
           <button type="submit" class="btn primary" id="btn-db-save">Adicionar</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- ── Maintenance Windows Modal ── -->
+  <div class="modal-overlay" id="modal-maintenance-overlay" role="dialog" aria-modal="true" aria-labelledby="modal-maintenance-title">
+    <div class="modal modal-maintenance-wide">
+      <div class="details-header">
+        <div class="details-header-left">
+          <h2 class="modal-title" id="modal-maintenance-title" style="margin-bottom:0;">Janelas de Manutenção</h2>
+          <p class="card-address" style="margin-top:4px;">Suprime alertas (som/popup/notificação) durante o intervalo. Status e uptime continuam normais.</p>
+        </div>
+        <div class="details-header-right" style="display:flex; align-items:center; gap:8px;">
+          <button type="button" class="btn ghost btn-icon-close" id="btn-maintenance-close" title="Fechar">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Form -->
+      <form id="form-maintenance" novalidate style="margin-top:1rem;">
+        <input type="hidden" id="input-mw-id">
+
+        <div class="form-row-2">
+          <div class="form-group">
+            <label for="input-mw-name">Nome (opcional)</label>
+            <input id="input-mw-name" type="text" placeholder="ex: Deploy semanal" autocomplete="off">
+          </div>
+
+          <div class="form-group">
+            <label for="input-mw-recurrence">Tipo</label>
+            <select id="input-mw-recurrence">
+              <option value="none">Uma vez (data específica)</option>
+              <option value="daily">Diariamente (todos os dias no horário)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="input-mw-target">Aplica a</label>
+          <select id="input-mw-target">
+            <option value="all">Todos os dispositivos (global)</option>
+          </select>
+        </div>
+
+        <!-- One-time: datetime range -->
+        <div id="mw-onetime-fields" class="form-row-2">
+          <div class="form-group">
+            <label for="input-mw-start-datetime">Início</label>
+            <input id="input-mw-start-datetime" type="datetime-local">
+          </div>
+          <div class="form-group">
+            <label for="input-mw-end-datetime">Fim</label>
+            <input id="input-mw-end-datetime" type="datetime-local">
+          </div>
+        </div>
+
+        <!-- Daily: time-of-day -->
+        <div id="mw-daily-fields" class="form-row-2" style="display:none;">
+          <div class="form-group">
+            <label for="input-mw-start-time">Hora início</label>
+            <input id="input-mw-start-time" type="time">
+          </div>
+          <div class="form-group">
+            <label for="input-mw-end-time">Hora fim</label>
+            <input id="input-mw-end-time" type="time">
+            <p class="form-hint">Se a hora fim for menor que a inicial, a janela cruza meia-noite (ex.: 23h → 06h).</p>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-top:0.25rem;">
+          <label class="switch-row">
+            <input type="checkbox" id="input-mw-is-active" checked>
+            <span>Janela ativa</span>
+          </label>
+        </div>
+
+        <div class="modal-footer" style="margin-top:0.75rem;">
+          <button type="button" class="btn ghost" id="btn-mw-cancel-edit">Limpar</button>
+          <button type="submit" class="btn primary" id="btn-mw-save">Adicionar</button>
+        </div>
+      </form>
+
+      <!-- Existing windows -->
+      <div class="details-section-label" style="margin-top:1.25rem;">
+        <span>Janelas cadastradas</span>
+      </div>
+      <div id="mw-list" class="events-list" style="max-height:300px; background:var(--color-surface); border:1px solid var(--color-border); border-radius:var(--radius-md); padding:0.25rem;">
+        <div class="events-empty">Carregando...</div>
+      </div>
     </div>
   </div>
 

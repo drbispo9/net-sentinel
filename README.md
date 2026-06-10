@@ -81,21 +81,61 @@ Abra **http://localhost:8000** no navegador.
 
 | Variável | Descrição | Padrão |
 |---|---|---|
-| `DATABASE_URL` | URL do banco SQLite | `sqlite+aiosqlite:///./netsentinel.db` |
-| `WORKER_AUTH_KEY` | Chave de autenticação dos workers | `your-super-secret-worker-key` |
+| `DATABASE_URL` | URL do banco (SQLite ou PostgreSQL) | `sqlite+aiosqlite:///./netsentinel.db` |
+| `API_KEY` | Chave exigida nos endpoints de escrita (header `X-API-Key`). **Vazia = escrita aberta.** | _(vazio)_ |
+| `CORS_ORIGINS` | Origens permitidas no CORS (separadas por vírgula) | `*` |
+| `DB_MONITOR_INTERVAL_SECONDS` | Intervalo entre checagens dos monitores de banco | `30` |
+| `DB_LOCK_MIN_WAIT_MS` | Ignora bloqueios com `waitTime` abaixo desse valor (ms); `0` conta todos | `0` |
+| `DB_DATA_MAX_AGE_SECONDS` | Marca WARNING se `updatedAt` da Sentinela ficar mais velho que isso; `0` desabilita | `0` |
+| `PORTAL_OAB_USERNAME` / `PORTAL_OAB_PASSWORD` | Credenciais do check L7 autenticado do Portal OAB | _(vazio)_ |
+
+## 🗄️ Monitoramento de banco (locks)
+
+Cada monitor de banco consulta um endpoint da API **Sentinela** que retorna as
+**sessões bloqueadas/em espera** no banco. O serviço:
+
+- tenta a leitura **até 3×** antes de declarar `DOWN` (absorve blips de rede);
+- é **fail-closed**: se o JSON não vier no formato esperado, marca `DOWN` em vez
+  de assumir "sem locks" silenciosamente;
+- escala `WARNING` (1ª rodada com bloqueios) → `CRITICAL_LOCK` (2ª rodada+);
+- opcionalmente ignora bloqueios curtos (`DB_LOCK_MIN_WAIT_MS`) e sinaliza dados
+  desatualizados (`DB_DATA_MAX_AGE_SECONDS`).
+
+> ⚠️ Isto detecta **bloqueio sustentado** (contenção), não *deadlock* no sentido
+> técnico — deadlocks são resolvidos pelo próprio SGBD em segundos e não aparecem
+> como linhas persistentes nesse endpoint.
+
+## 🔒 Autenticação
+
+Os endpoints de **escrita** (`POST`/`PUT`/`DELETE`) são protegidos por token quando
+`API_KEY` está definida no `.env`. O cliente envia o header `X-API-Key`. Os endpoints
+de **leitura** (`GET`) e o dashboard permanecem abertos.
+
+No frontend, a chave é solicitada automaticamente na primeira ação de escrita que
+retornar `401` e guardada no navegador (`localStorage`). Se `API_KEY` não estiver
+definida, a escrita fica aberta e o servidor registra um aviso na inicialização.
 
 ## 📡 API Endpoints
 
-| Método | Rota | Descrição |
-|---|---|---|
-| `GET` | `/api/devices` | Lista todos os dispositivos |
-| `POST` | `/api/devices` | Cadastra novo dispositivo |
-| `PUT` | `/api/devices/{id}` | Atualiza dispositivo |
-| `DELETE` | `/api/devices/{id}` | Remove dispositivo |
-| `GET` | `/api/devices/{id}/stats` | Estatísticas do dispositivo |
-| `GET` | `/api/events` | Log de eventos recentes |
-| `POST` | `/api/report-interno` | Report de workers (auth) |
-| `WS` | `/ws` | WebSocket para tempo real |
+| Método | Rota | Auth | Descrição |
+|---|---|---|---|
+| `GET` | `/api/devices` | — | Lista todos os dispositivos |
+| `POST` | `/api/devices` | 🔒 | Cadastra novo dispositivo |
+| `PUT` | `/api/devices/{id}` | 🔒 | Atualiza dispositivo |
+| `DELETE` | `/api/devices/{id}` | 🔒 | Remove dispositivo |
+| `GET` | `/api/devices/{id}/stats` | — | Estatísticas + uptime real (janela de 7 dias) |
+| `GET` | `/api/devices/{id}/performance` | — | Histórico de métricas L7 |
+| `GET` | `/api/devices/{id}/report/pdf` | — | Relatório em PDF |
+| `GET` | `/api/events` | — | Log de eventos recentes |
+| `GET`/`POST`/`PUT`/`DELETE` | `/api/db-monitors[...]` | 🔒 (escrita) | Monitores de banco de dados |
+| `WS` | `/ws` | — | WebSocket para tempo real |
+
+## 🧪 Testes
+
+```bash
+pip install -r requirements.txt
+pytest
+```
 
 ## 🛠️ Tecnologias
 

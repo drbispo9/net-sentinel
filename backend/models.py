@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Enum, DateTime, Float, ForeignKey, Boolean, TypeDecorator
+from sqlalchemy import Column, Integer, String, Enum, DateTime, Float, ForeignKey, Boolean, TypeDecorator, Index
 from sqlalchemy.sql import func
 import enum
 import zoneinfo
@@ -73,13 +73,19 @@ class Device(Base):
 
 class EventLog(Base):
     __tablename__ = "event_logs"
+    # Índice composto para a query de stats por monitor de DB
+    # (filtra por db_monitor_id e ordena por timestamp desc).
+    __table_args__ = (
+        Index("ix_event_logs_db_monitor_timestamp", "db_monitor_id", "timestamp"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    device_id = Column(Integer, ForeignKey("devices.id"), nullable=True)
+    device_id = Column(Integer, ForeignKey("devices.id", ondelete="CASCADE"), nullable=True)
     db_monitor_id = Column(Integer, ForeignKey("database_monitors.id", ondelete="CASCADE"), nullable=True)
     old_status = Column(String, nullable=False)
     new_status = Column(String, nullable=False)
-    latency = Column(Float, nullable=True)  # in milliseconds
+    latency = Column(Float, nullable=True)      # latência em ms (eventos de device)
+    lock_count = Column(Integer, nullable=True)  # nº de locks (eventos de monitor de DB)
     timestamp = Column(TZDateTime(timezone=True), default=get_brasilia_time)
 
 
@@ -115,3 +121,46 @@ class DatabaseMonitor(Base):
 
     created_at  = Column(TZDateTime(timezone=True), default=get_brasilia_time)
     updated_at  = Column(TZDateTime(timezone=True), default=get_brasilia_time, onupdate=get_brasilia_time)
+
+
+class AppSetting(Base):
+    """Configurações globais simples (key/value) compartilhadas por todos os
+    clientes — ex.: 'alert_sound_enabled'. create_all cria esta tabela em
+    bancos existentes automaticamente (não precisa de migração de coluna)."""
+    __tablename__ = "app_settings"
+
+    key   = Column(String, primary_key=True)
+    value = Column(String, nullable=True)
+
+
+class MaintenanceWindow(Base):
+    """
+    Janela de manutenção programada — durante o intervalo, alertas
+    (som/popup/notificação) ficam SUPRIMIDOS, mas o monitoramento continua
+    normal e DOWN ainda conta no uptime.
+
+    Tipos:
+      - recurrence="none":   janela única; starts_at/ends_at são datetimes absolutos.
+      - recurrence="daily":  janela diária; apenas a HORA de starts_at/ends_at é
+                             considerada (a parte de data é ignorada). Se a hora
+                             final for menor que a inicial, a janela cruza
+                             a meia-noite (ex.: 23h → 06h).
+
+    Escopo:
+      - device_id=NULL → janela GLOBAL (aplica a todos os devices + monitores).
+      - device_id=N    → janela específica para esse Device.
+      - db_monitor_id=N→ janela específica para esse DatabaseMonitor.
+    """
+    __tablename__ = "maintenance_windows"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    name            = Column(String, nullable=True)
+    device_id       = Column(Integer, ForeignKey("devices.id", ondelete="CASCADE"), nullable=True)
+    db_monitor_id   = Column(Integer, ForeignKey("database_monitors.id", ondelete="CASCADE"), nullable=True)
+    starts_at       = Column(TZDateTime(timezone=True), nullable=False)
+    ends_at         = Column(TZDateTime(timezone=True), nullable=False)
+    recurrence      = Column(String, nullable=False, default="none")  # "none" | "daily"
+    is_active       = Column(Boolean, default=True)
+
+    created_at      = Column(TZDateTime(timezone=True), default=get_brasilia_time)
+    updated_at      = Column(TZDateTime(timezone=True), default=get_brasilia_time, onupdate=get_brasilia_time)

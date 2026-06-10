@@ -1,7 +1,17 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List
 from datetime import datetime
+from urllib.parse import urlparse
 from .models import DeviceStatus
+
+
+def _validate_http_url(value: str) -> str:
+    """Garante que a string é uma URL http(s) válida. Mantém o tipo str."""
+    v = (value or "").strip()
+    parsed = urlparse(v)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("endpoint_url deve ser uma URL http(s) válida (ex.: https://host/caminho)")
+    return v
 
 class DeviceCreate(BaseModel):
     name: str
@@ -32,7 +42,7 @@ class DeviceResponse(BaseModel):
     name: str
     device_type: str
     address: str
-    status: str
+    status: DeviceStatus
     is_muted: bool
     failure_count: int
     response_time_ms: Optional[int] = None
@@ -90,11 +100,29 @@ class DBMonitorCreate(BaseModel):
     endpoint_url: str
     is_muted: Optional[bool] = False
 
+    @field_validator("endpoint_url")
+    @classmethod
+    def _check_url(cls, v: str) -> str:
+        return _validate_http_url(v)
+
 
 class DBMonitorUpdate(BaseModel):
     nome: Optional[str] = None
     endpoint_url: Optional[str] = None
     is_muted: Optional[bool] = None
+
+    @field_validator("endpoint_url")
+    @classmethod
+    def _check_url(cls, v):
+        return v if v is None else _validate_http_url(v)
+
+
+class SettingsResponse(BaseModel):
+    alert_sound_enabled: bool
+
+
+class SettingsUpdate(BaseModel):
+    alert_sound_enabled: Optional[bool] = None
 
 
 class DBMonitorResponse(BaseModel):
@@ -107,6 +135,42 @@ class DBMonitorResponse(BaseModel):
     consecutive_lock_count: Optional[int] = 0
     created_at: datetime
     updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ─── Maintenance Windows ─────────────────────────────────────────────────────
+
+class MaintenanceWindowBase(BaseModel):
+    name: Optional[str] = None
+    device_id: Optional[int] = None        # null = global (não-DB)
+    db_monitor_id: Optional[int] = None    # null = sem alvo DB
+    starts_at: datetime
+    ends_at: datetime
+    recurrence: str = "none"               # "none" | "daily"
+    is_active: bool = True
+
+
+class MaintenanceWindowCreate(MaintenanceWindowBase):
+    pass
+
+
+class MaintenanceWindowUpdate(BaseModel):
+    name: Optional[str] = None
+    device_id: Optional[int] = None
+    db_monitor_id: Optional[int] = None
+    starts_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+    recurrence: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class MaintenanceWindowResponse(MaintenanceWindowBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    is_currently_active: bool = False     # computed: "está vigente agora?"
 
     class Config:
         from_attributes = True

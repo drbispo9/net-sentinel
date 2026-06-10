@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NetSentinel — Configurar servidor</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #080d1a;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      color: #d0e4ff;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    .card {
+      width: calc(100% - 64px);
+      max-width: 440px;
+      background: #0f1829;
+      border: 0.5px solid rgba(99, 179, 255, 0.25);
+      border-radius: 16px;
+      padding: 40px;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+    }
+
+    .logo { font-size: 40px; line-height: 1; text-align: center; }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 14px 0 4px;
+      text-align: center;
+    }
+
+    .sub {
+      font-size: 13px;
+      color: #607090;
+      margin: 0 0 28px;
+      text-align: center;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      color: #8aa0c0;
+      margin-bottom: 8px;
+    }
+
+    input {
+      width: 100%;
+      background: #0a1322;
+      color: #d0e4ff;
+      border: 0.5px solid rgba(99, 179, 255, 0.3);
+      border-radius: 8px;
+      padding: 13px 14px;
+      font-size: 15px;
+      outline: none;
+    }
+    input:focus { border-color: #63b3ff; }
+
+    .hint {
+      font-size: 11px;
+      color: #51607a;
+      margin: 8px 2px 0;
+    }
+
+    button {
+      width: 100%;
+      margin-top: 24px;
+      background: #1b3058;
+      color: #b8d0f0;
+      border: 0.5px solid rgba(99, 179, 255, 0.3);
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    button:hover  { background: #244070; }
+    button:active { background: #16294b; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">🛰️</div>
+    <h1>Conectar ao servidor</h1>
+    <p class="sub">Informe o endereço onde o NetSentinel (FastAPI) está rodando.</p>
+
+    <label for="server">Endereço do servidor</label>
+    <input
+      id="server"
+      type="text"
+      placeholder="192.168.0.50:8000"
+      autocomplete="off"
+      spellcheck="false"
+      autofocus
+    />
+    <p class="hint">Ex.: <code>192.168.0.50</code>, <code>servidor:8000</code> ou <code>https://monitor.minhaempresa.com</code>. Sem porta, assume 8000.</p>
+
+    <button id="connect" type="button">Conectar</button>
+  </div>
+
+  <script>
+    (function () {
+      var input = document.getElementById('server');
+      var btn = document.getElementById('connect');
+
+      // Pré-preenche com o endereço já salvo (ou o padrão).
+      if (window.electronAPI && typeof window.electronAPI.getServerUrl === 'function') {
+        window.electronAPI.getServerUrl().then(function (url) {
+          if (url) input.value = url;
+          input.focus();
+          input.select();
+        });
+      }
+
+      function connect() {
+        var value = (input.value || '').trim();
+        if (!value) { input.focus(); return; }
+        if (window.electronAPI && typeof window.electronAPI.setServerUrl === 'function') {
+          window.electronAPI.setServerUrl(value);
+        }
+      }
+
+      btn.addEventListener('click', connect);
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') connect();
+      });
+    })();
+  </script>
+</body>
+</html>

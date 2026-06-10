@@ -4,19 +4,55 @@
  */
 
 /* ─── Config ─── */
-const API_BASE = 'http://127.0.0.1:8000';
-const WS_URL   = 'ws://127.0.0.1:8000/ws';
+// Derivado da origem atual: funciona em localhost, na rede e atrás de HTTPS.
+// O frontend é servido pelo próprio backend, então a API está na mesma origem.
+const API_BASE = window.location.origin;
+const WS_URL   = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
 const POLL_INTERVAL_MS = 15_000;   // Fallback REST polling
 const TOAST_DURATION_MS = 5000;
+
+/* ─── API key (autenticação dos endpoints de escrita) ─── */
+const API_KEY_STORAGE = 'ns_api_key';
+
+/**
+ * Wrapper de fetch que injeta o header X-API-Key em operações de escrita.
+ * Só pede a chave quando o servidor responde 401 (se a auth estiver
+ * desabilitada no servidor, nunca há 401 e nada é solicitado ao usuário).
+ */
+async function apiFetch(url, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  const needsAuth = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(method);
+
+  const buildOpts = () => {
+    const opts = { ...options, headers: { ...(options.headers || {}) } };
+    const key = localStorage.getItem(API_KEY_STORAGE);
+    if (needsAuth && key) opts.headers['X-API-Key'] = key;
+    return opts;
+  };
+
+  let res = await fetch(url, buildOpts());
+
+  if (res.status === 401 && needsAuth) {
+    const key = prompt('Esta ação requer a chave de API (API_KEY do servidor):');
+    if (key) {
+      localStorage.setItem(API_KEY_STORAGE, key.trim());
+      res = await fetch(url, buildOpts());
+    }
+  }
+  return res;
+}
 
 /* ─── State ─── */
 let devices = [];
 let dbMonitors = [];
+let maintenanceWindows = [];           // cached list of all windows
 let editingDbId = null;
+let editingMaintenanceId = null;
 let wsSocket = null;
 let wsReconnectTimer = null;
 let pollTimer = null;
 let alertActive = false;
+let soundEnabled = true;               // som de alerta global (sincronizado via servidor/WS)
 let editingDeviceId = null;
 let currentDetailsDeviceId = null;
 let currentDetailsDevice = null;
@@ -96,6 +132,9 @@ function connectWS() {
     setWsStatus('connected');
     clearTimeout(wsReconnectTimer);
     console.log('[WS] Connected');
+    // Ressincroniza o som ao (re)conectar — cobre settings_update perdidos
+    // enquanto o WS esteve fora do ar.
+    fetchSettings();
   });
 
   wsSocket.addEventListener('message', (evt) => {
@@ -119,6 +158,12 @@ function connectWS() {
 }
 
 function handleWsMessage(msg) {
+  // Configuração global (ex.: som de alerta) — sincroniza todos os clientes.
+  if (msg.type === 'settings_update') {
+    if (msg.alert_sound_enabled !== undefined) setSoundEnabled(!!msg.alert_sound_enabled);
+    return;
+  }
+
   // Normalize incoming status labels from WebSocket
   if (msg.status === 'online') msg.status = 'UP';
   if (msg.status === 'offline') msg.status = 'DOWN';
@@ -143,8 +188,23 @@ function handleWsMessage(msg) {
       // Only handle alerts/toasts for actual status changes to avoid repetitive audio/toasts
       if (msg.type === 'status_change' && statusChanged) {
         if (device.status === 'DOWN' || device.status === 'CRITICAL_LOCK' || device.status === 'CRITICAL_OVERLOAD') {
-          if (!device.is_muted) {
+          // Suprime alerta se device estiver mutado individualmente OU dentro de janela de manutenção.
+          const suppressed = device.is_muted || msg.muted_by_maintenance;
+          if (suppressed) {
+            const reason = msg.muted_by_maintenance ? 'manutenção programada' : 'silenciado';
+            showToast(`🛠️ ${msg.device_name || device.name}: ${device.status} (${reason})`, 'info');
+          } else {
             triggerAlert(msg.device_name || device.name, device.status);
+
+            // Casca Electron: notificação nativa do SO + overlay de tela cheia.
+            if (window.electronAPI) {
+              window.electronAPI.sendAlert({
+                name: msg.device_name || device.name,
+                url: device.address,
+                time: new Date().toLocaleTimeString(),
+                critical: true
+              });
+            }
           }
         } else if (device.status === 'UP') {
           showToast(`✅ ${msg.device_name || device.name} voltou online!`, 'success');
@@ -169,8 +229,21 @@ function handleWsMessage(msg) {
 
       if (msg.type === 'db_status_change' && statusChanged) {
         if (monitor.status === 'DOWN' || monitor.status === 'CRITICAL_LOCK' || monitor.status === 'WARNING') {
-          if (!monitor.is_muted) {
+          const suppressed = monitor.is_muted || msg.muted_by_maintenance;
+          if (suppressed) {
+            const reason = msg.muted_by_maintenance ? 'manutenção programada' : 'silenciado';
+            showToast(`🛠️ ${msg.monitor_name || monitor.nome}: ${monitor.status} (${reason})`, 'info');
+          } else {
             triggerAlert(msg.monitor_name || monitor.nome, monitor.status);
+
+            if (window.electronAPI) {
+              window.electronAPI.sendAlert({
+                name: msg.monitor_name || monitor.nome,
+                url: monitor.endpoint_url || 'Monitor de banco de dados',
+                time: new Date().toLocaleTimeString(),
+                critical: monitor.status !== 'WARNING'
+              });
+            }
           }
         } else if (monitor.status === 'UP') {
           showToast(`✅ ${msg.monitor_name || monitor.nome} voltou online!`, 'success');
@@ -212,7 +285,7 @@ async function fetchDevices() {
 
 
 async function addDevice(payload) {
-  const res = await fetch(`${API_BASE}/api/devices`, {
+  const res = await apiFetch(`${API_BASE}/api/devices`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -225,12 +298,12 @@ async function addDevice(payload) {
 }
 
 async function deleteDevice(id) {
-  const res = await fetch(`${API_BASE}/api/devices/${id}`, { method: 'DELETE' });
+  const res = await apiFetch(`${API_BASE}/api/devices/${id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 }
 
 async function updateDeviceAPI(id, payload) {
-  const res = await fetch(`${API_BASE}/api/devices/${id}`, {
+  const res = await apiFetch(`${API_BASE}/api/devices/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -326,6 +399,47 @@ function renderDevices() {
   });
 }
 
+/**
+ * Verifica se um device/db_monitor está dentro de alguma janela de manutenção
+ * VIGENTE neste exato momento. Espelha a lógica do backend (one-time + daily
+ * com wrap-around de meia-noite) para que o badge no card apareça/suma sem
+ * precisar esperar a próxima mensagem do WS.
+ */
+function isUnderMaintenance({ deviceId = null, dbMonitorId = null } = {}) {
+  if (!Array.isArray(maintenanceWindows) || maintenanceWindows.length === 0) return false;
+  const now = new Date();
+  for (const w of maintenanceWindows) {
+    if (!w.is_active) continue;
+    const isGlobal = (w.device_id == null) && (w.db_monitor_id == null);
+    const targetsThis =
+      isGlobal ||
+      (deviceId    != null && w.device_id    === deviceId) ||
+      (dbMonitorId != null && w.db_monitor_id === dbMonitorId);
+    if (!targetsThis) continue;
+
+    const start = new Date(w.starts_at);
+    const end   = new Date(w.ends_at);
+
+    if (w.recurrence === 'none') {
+      if (now >= start && now <= end) return true;
+    } else if (w.recurrence === 'daily') {
+      const sH = start.getHours(), sM = start.getMinutes();
+      const eH = end.getHours(),   eM = end.getMinutes();
+      const nH = now.getHours(),   nM = now.getMinutes();
+      const mins = (h, m) => h * 60 + m;
+      const startMin = mins(sH, sM), endMin = mins(eH, eM), nowMin = mins(nH, nM);
+      if (startMin === endMin) continue;            // janela degenerada
+      if (endMin > startMin) {
+        if (nowMin >= startMin && nowMin <= endMin) return true;
+      } else {
+        // Wrap-around meia-noite (ex.: 23h → 06h)
+        if (nowMin >= startMin || nowMin <= endMin) return true;
+      }
+    }
+  }
+  return false;
+}
+
 function deviceCardHTML(d) {
   const statusClass = d.status.toLowerCase();
   const statusLabel = {
@@ -367,12 +481,17 @@ function deviceCardHTML(d) {
     responseTimeHtml = `<span class="response-time" style="color: ${color}; background: ${bg}; border: 0.5px solid ${border};">${d.response_time_ms}ms</span>`;
   }
 
+  const inMaintenance = isUnderMaintenance({ deviceId: d.id });
+  const maintenanceBadge = inMaintenance
+    ? '<span class="card-maintenance-badge" title="Em janela de manutenção — alertas suprimidos">🛠️ Manutenção</span>'
+    : '';
+
   return `
-    <div class="device-card card-${statusClass} ${d.is_muted ? 'card-muted' : ''}" data-id="${d.id}">
+    <div class="device-card card-${statusClass} ${d.is_muted ? 'card-muted' : ''} ${inMaintenance ? 'in-maintenance' : ''}" data-id="${d.id}">
       <div class="card-header">
         <div class="card-info">
           <div class="card-title">${escHtml(d.name)} ${mutedIndicator}</div>
-          <div class="card-address">${escHtml(d.address)}</div>
+          <div class="card-address" title="${escHtml(d.address)}">${escHtml(d.address)}</div>
         </div>
         <div class="status-container">
           <span class="card-status-badge ${badgeClass}">${statusLabel}</span>
@@ -381,6 +500,7 @@ function deviceCardHTML(d) {
       </div>
       <div class="card-meta">
         <span class="card-type-badge">${typeLabel}</span>
+        ${maintenanceBadge}
         ${failures}
       </div>
       <div class="card-actions">
@@ -463,7 +583,7 @@ function triggerAlert(deviceName, status = 'DOWN') {
     
   showToast(alertMsg, 'error');
 
-  if (audioAlert) {
+  if (audioAlert && soundEnabled) {
     audioAlert.play().catch(() => {
       console.warn('[Audio] Autoplay blocked by browser');
     });
@@ -530,6 +650,86 @@ function checkAndStopAlert() {
                           dbMonitors.some(m => (m.status === 'DOWN' || m.status === 'CRITICAL_LOCK') && !m.is_muted);
   if (!hasUnmutedAlert && alertActive) {
     silenciarAlerta();
+  }
+}
+
+/* ────────────────────────────────────────────────
+   Som de alerta global (sincronizado via servidor)
+──────────────────────────────────────────────── */
+async function fetchSettings() {
+  try {
+    const res = await fetch(`${API_BASE}/api/settings`);
+    if (res.ok) {
+      const s = await res.json();
+      setSoundEnabled(!!s.alert_sound_enabled);
+    }
+  } catch (e) {
+    console.warn('[Settings] Falha ao carregar configurações:', e);
+  }
+}
+
+// Aplica o estado do som (não toca no overlay/visual — só no áudio).
+function setSoundEnabled(enabled) {
+  soundEnabled = !!enabled;
+  updateSoundToggleUI();
+  if (!soundEnabled) {
+    if (audioAlert) { audioAlert.pause(); audioAlert.currentTime = 0; }
+  } else if (alertActive && audioAlert) {
+    // Reativou o som com um alerta ainda ativo → retoma.
+    audioAlert.play().catch(() => {});
+  }
+}
+
+function updateSoundToggleUI() {
+  const btn   = $('btn-sound-toggle');
+  const icon  = $('sound-toggle-icon');
+  const label = $('sound-toggle-label');
+  if (!btn) return;
+  if (label) label.textContent = soundEnabled ? 'Som: ligado' : 'Som: desligado';
+  btn.classList.toggle('sound-off', !soundEnabled);
+  btn.title = soundEnabled
+    ? 'Som de alerta LIGADO (todos os clientes). Clique para desligar.'
+    : 'Som de alerta DESLIGADO (todos os clientes). Clique para ligar.';
+  if (icon) {
+    const base = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>';
+    icon.innerHTML = base + (soundEnabled
+      ? '<path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>'
+      : '<line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>');
+  }
+}
+
+// Alterna o som no servidor; o broadcast settings_update sincroniza todos.
+async function toggleSound() {
+  try {
+    // Lê o estado ATUAL do servidor antes de inverter. Não dá para confiar no
+    // estado local (soundEnabled): se este cliente perdeu um broadcast/reconectou,
+    // inverter a partir dele mandaria o valor errado (no-op) e o controle "sumiria".
+    let current = soundEnabled;
+    try {
+      const g = await fetch(`${API_BASE}/api/settings`);
+      if (g.ok) current = !!(await g.json()).alert_sound_enabled;
+    } catch { /* sem rede: cai no estado local como melhor palpite */ }
+
+    const next = !current;
+    const res = await apiFetch(`${API_BASE}/api/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ alert_sound_enabled: next }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    // Aplica o estado autoritativo devolvido pelo servidor (não o palpite local).
+    const data = await res.json().catch(() => ({ alert_sound_enabled: next }));
+    const applied = !!data.alert_sound_enabled;
+    setSoundEnabled(applied);
+    showToast(applied
+      ? '🔊 Som de alerta ativado em todos os clientes.'
+      : '🔇 Som de alerta desativado em todos os clientes (inclusive a tela do Electron).',
+      'info');
+  } catch (err) {
+    showToast(`Erro ao alterar o som: ${err.message}`, 'error');
   }
 }
 
@@ -664,8 +864,8 @@ async function refreshDeviceDetails(silent = false) {
           const newTag = statusTag(ev.new_status);
 
           let locksInfo = "";
-          if (isDb && ev.latency !== null && ev.latency !== undefined) {
-            locksInfo = ` <span style="font-size: 0.72rem; color: var(--color-text-muted);">(${ev.latency} lock(s))</span>`;
+          if (isDb && ev.lock_count !== null && ev.lock_count !== undefined) {
+            locksInfo = ` <span style="font-size: 0.72rem; color: var(--color-text-muted);">(${ev.lock_count} lock(s))</span>`;
           }
 
           return `
@@ -732,6 +932,20 @@ async function openDeviceDetails(id, name, address, status, deviceType) {
   const isDb  = deviceType === 'DATABASE';
   detailsL7Section.style.display  = isWeb ? '' : 'none';
   detailsTotalMsBox.style.display = (isWeb || isDb) ? '' : 'none';
+
+  // Keyword validation info (WEB only, when active)
+  const keywordSec  = $('details-keyword-section');
+  const keywordTxt  = $('details-keyword-text');
+  const device      = devices.find(d => d.id === id);
+  if (keywordSec && keywordTxt) {
+    if (isWeb && device && device.validar_texto && device.texto_obrigatorio) {
+      keywordTxt.textContent = device.texto_obrigatorio;
+      keywordTxt.title = device.texto_obrigatorio; // valor completo ao passar o mouse (chip trunca com ellipsis)
+      keywordSec.style.display = '';
+    } else {
+      keywordSec.style.display = 'none';
+    }
+  }
 
   const totalMsLabel = detailsTotalMsBox.querySelector('.stat-label');
   if (totalMsLabel) {
@@ -852,16 +1066,25 @@ async function handleFormSubmit(e) {
     return;
   }
 
+  // ── Keyword validation payload ────────────────────────────────────────
+  // Para dispositivos WEB com validação ativada, exigimos um texto não-vazio
+  // (caso contrário a verificação não tem o que procurar e fica sem efeito).
+  const isWeb = type === 'WEB';
+  const validarTexto = (isWeb && inputValidarTexto) ? inputValidarTexto.checked : false;
+  const keywordRaw = (isWeb && inputTextoObrigatorio) ? inputTextoObrigatorio.value.trim() : '';
+  if (validarTexto && !keywordRaw) {
+    showToast('Informe o texto/keyword obrigatório para a validação de conteúdo.', 'warning');
+    inputTextoObrigatorio?.focus();
+    return;
+  }
+  const textoObrigatorio = validarTexto ? keywordRaw : null;
+
   btnModalSave.disabled = true;
   btnModalSave.textContent = 'Salvando...';
 
   try {
     if (editingDeviceId) {
       // Edit mode
-      const validarTexto = inputValidarTexto ? inputValidarTexto.checked : false;
-      const textoObrigatorio = (validarTexto && inputTextoObrigatorio)
-        ? inputTextoObrigatorio.value.trim() || null
-        : null;
       const updated = await updateDeviceAPI(editingDeviceId, { name, device_type: type, address, validar_texto: validarTexto, texto_obrigatorio: textoObrigatorio });
       const idx = devices.findIndex(d => d.id === editingDeviceId);
       if (idx !== -1) Object.assign(devices[idx], updated);
@@ -871,10 +1094,6 @@ async function handleFormSubmit(e) {
       showToast(`✏️ "${name}" atualizado com sucesso!`, 'success');
     } else {
       // Add mode
-      const validarTexto = inputValidarTexto ? inputValidarTexto.checked : false;
-      const textoObrigatorio = (validarTexto && inputTextoObrigatorio)
-        ? inputTextoObrigatorio.value.trim() || null
-        : null;
       const newDevice = await addDevice({ name, device_type: type, address, validar_texto: validarTexto, texto_obrigatorio: textoObrigatorio });
       devices.push(newDevice);
       renderDevices();
@@ -1010,9 +1229,15 @@ function init() {
 
   // Initial load
   fetchDevices();
+  fetchMaintenanceWindows();
+  fetchSettings();
 
   // Periodic REST polling (fallback / sync)
-  pollTimer = setInterval(fetchDevices, POLL_INTERVAL_MS);
+  pollTimer = setInterval(() => {
+    fetchDevices();
+    fetchMaintenanceWindows();
+    fetchSettings();   // ressincroniza o som caso um broadcast tenha sido perdido
+  }, POLL_INTERVAL_MS);
 
   // WebSocket real-time
   connectWS();
@@ -1042,6 +1267,24 @@ function init() {
   // Keyword matching switch toggle
   inputValidarTexto?.addEventListener('change', () => toggleKeywordInput(inputValidarTexto.checked));
   btnSilenciar?.addEventListener('click', silenciarAlerta);
+  $('btn-sound-toggle')?.addEventListener('click', toggleSound);
+
+  // ── Network discovery bindings (HARDWARE tab) ──
+  $('btn-detect-range')?.addEventListener('click', detectLocalRange);
+  $('btn-start-scan')?.addEventListener('click', onStartScanClick);
+  $('btn-select-all')?.addEventListener('click', selectAllDiscovered);
+  $('btn-add-selected')?.addEventListener('click', addSelectedDiscovered);
+  $('btn-clear-discovery')?.addEventListener('click', clearDiscoveryList);
+
+  // ── Maintenance windows bindings ──
+  $('btn-maintenance')?.addEventListener('click', openMaintenanceModal);
+  $('btn-maintenance-close')?.addEventListener('click', closeMaintenanceModal);
+  $('btn-mw-cancel-edit')?.addEventListener('click', resetMaintenanceForm);
+  $('form-maintenance')?.addEventListener('submit', handleMaintenanceFormSubmit);
+  $('input-mw-recurrence')?.addEventListener('change', (e) => toggleRecurrenceFields(e.target.value));
+  $('modal-maintenance-overlay')?.addEventListener('click', (e) => {
+    if (e.target.id === 'modal-maintenance-overlay') closeMaintenanceModal();
+  });
 
   // Nav Tab bindings
   navBtns.forEach(btn => {
@@ -1054,15 +1297,18 @@ function init() {
       currentView = btn.dataset.view;
 
       const isDb = currentView === 'DATABASE';
-      const devGrid  = $('devices-grid');
-      const dbSection = $('db-monitor-section');
-      const addBtn   = $('btn-add-device');
-      const addDbBtn = $('btn-add-db-monitor');
+      const isHw = currentView === 'HARDWARE';
+      const devGrid     = $('devices-grid');
+      const dbSection   = $('db-monitor-section');
+      const discoverySec = $('discovery-section');
+      const addBtn      = $('btn-add-device');
+      const addDbBtn    = $('btn-add-db-monitor');
 
-      if (devGrid)   devGrid.style.display    = isDb ? 'none' : '';
-      if (dbSection) dbSection.style.display  = isDb ? '' : 'none';
-      if (addBtn)    addBtn.style.display      = isDb ? 'none' : '';
-      if (addDbBtn)  addDbBtn.style.display    = isDb ? '' : 'none';
+      if (devGrid)      devGrid.style.display      = isDb ? 'none' : '';
+      if (dbSection)    dbSection.style.display    = isDb ? '' : 'none';
+      if (discoverySec) discoverySec.style.display = isHw ? '' : 'none';
+      if (addBtn)       addBtn.style.display       = isDb ? 'none' : '';
+      if (addDbBtn)     addDbBtn.style.display     = isDb ? '' : 'none';
 
       if (isDb) {
         sectionTitle.textContent = 'Monitoramento de Banco de Dados';
@@ -1093,6 +1339,8 @@ function init() {
       if (modalOverlay.classList.contains('open')) closeModal();
       if (detailsOverlay.classList.contains('open')) closeDetailsModal();
       if (modalDbOverlay && modalDbOverlay.classList.contains('open')) closeDbModal();
+      const mwOv = $('modal-maintenance-overlay');
+      if (mwOv && mwOv.classList.contains('open')) closeMaintenanceModal();
     }
   });
 }
@@ -1207,12 +1455,17 @@ function dbMonitorCardHTML(m) {
 
   const mutedIndicator = m.is_muted ? '<span class="muted-indicator" title="Alerta silenciado">🔇</span>' : '';
 
+  const inMaintenance = isUnderMaintenance({ dbMonitorId: m.id });
+  const maintenanceBadge = inMaintenance
+    ? '<span class="card-maintenance-badge" title="Em janela de manutenção — alertas suprimidos">🛠️ Manutenção</span>'
+    : '';
+
   return `
-    <div class="device-card card-${statusClass} ${m.is_muted ? 'card-muted' : ''}" data-id="${m.id}">
+    <div class="device-card card-${statusClass} ${m.is_muted ? 'card-muted' : ''} ${inMaintenance ? 'in-maintenance' : ''}" data-id="${m.id}">
       <div class="card-header">
         <div class="card-info">
           <div class="card-title">${escHtml(m.nome)} ${mutedIndicator}</div>
-          <div class="card-address">${escHtml(m.endpoint_url)}</div>
+          <div class="card-address" title="${escHtml(m.endpoint_url)}">${escHtml(m.endpoint_url)}</div>
         </div>
         <div class="status-container">
           <span class="card-status-badge ${badgeClass}">${statusLabel}</span>
@@ -1220,6 +1473,7 @@ function dbMonitorCardHTML(m) {
       </div>
       <div class="card-meta">
         <span class="card-type-badge">Banco de Dados</span>
+        ${maintenanceBadge}
         ${lockBadge}
       </div>
       <div class="card-actions">
@@ -1295,7 +1549,7 @@ async function handleDbFormSubmit(e) {
 
   try {
     if (editingDbId) {
-      const res = await fetch(`${API_BASE}/api/db-monitors/${editingDbId}`, {
+      const res = await apiFetch(`${API_BASE}/api/db-monitors/${editingDbId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ nome, endpoint_url }),
@@ -1309,7 +1563,7 @@ async function handleDbFormSubmit(e) {
       if (idx !== -1) Object.assign(dbMonitors[idx], updated);
       showToast(`✏️ "${nome}" atualizado com sucesso!`, 'success');
     } else {
-      const res = await fetch(`${API_BASE}/api/db-monitors`, {
+      const res = await apiFetch(`${API_BASE}/api/db-monitors`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ nome, endpoint_url }),
@@ -1338,7 +1592,7 @@ async function toggleMuteDb(id) {
   if (!monitor) return;
   const newMuted = !monitor.is_muted;
   try {
-    const res = await fetch(`${API_BASE}/api/db-monitors/${id}`, {
+    const res = await apiFetch(`${API_BASE}/api/db-monitors/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ is_muted: newMuted }),
@@ -1367,7 +1621,7 @@ async function handleDeleteDb(id, name) {
   if (card) card.classList.add('removing');
 
   try {
-    const res = await fetch(`${API_BASE}/api/db-monitors/${id}`, { method: 'DELETE' });
+    const res = await apiFetch(`${API_BASE}/api/db-monitors/${id}`, { method: 'DELETE' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     setTimeout(() => {
       dbMonitors = dbMonitors.filter(m => m.id !== id);
@@ -1378,6 +1632,622 @@ async function handleDeleteDb(id, name) {
   } catch (err) {
     if (card) card.classList.remove('removing');
     showToast(`Erro ao remover: ${err.message}`, 'error');
+  }
+}
+
+/* ============================================================
+   Network Discovery (Infraestrutura tab)
+   ============================================================ */
+
+const discoveryState = {
+  ws: null,
+  total: 0,
+  scanned: 0,
+  found: 0,
+  devices: {},     // ip → device object received from server
+  scanning: false,
+};
+
+const DEVICE_TYPE_LABELS = {
+  switch:       'Switch',
+  router:       'Roteador',
+  firewall:     'Firewall',
+  access_point: 'Access Point',
+  unknown:      'Desconhecido',
+};
+
+async function detectLocalRange() {
+  const input = $('network-range');
+  const btn   = $('btn-detect-range');
+  if (!input || !btn) return;
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Detectando...';
+  try {
+    const res = await fetch(`${API_BASE}/api/infrastructure/network/local-range`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.suggested_range) {
+      input.value = data.suggested_range;
+      showToast(`🛰️ IP local detectado: ${data.local_ip}`, 'info');
+    } else {
+      showToast('Não foi possível detectar o IP local.', 'warning');
+    }
+  } catch (err) {
+    showToast(`Erro ao detectar IP: ${err.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+function onStartScanClick() {
+  if (discoveryState.scanning) {
+    cancelNetworkScan();
+  } else {
+    startNetworkScan();
+  }
+}
+
+function startNetworkScan() {
+  if (discoveryState.scanning) return;
+
+  const input = $('network-range');
+  const range = input ? input.value.trim() : '';
+  if (!range) {
+    showToast('Informe o range CIDR (ex: 192.168.1.0/24).', 'warning');
+    input?.focus();
+    return;
+  }
+
+  // Reset UI/state
+  discoveryState.total   = 0;
+  discoveryState.scanned = 0;
+  discoveryState.found   = 0;
+  discoveryState.devices = {};
+  discoveryState.scanning = true;
+
+  $('discovery-results').innerHTML = '';
+  $('discovery-actions').style.display = 'none';
+  const progress = $('discovery-progress');
+  progress.style.display = '';
+  $('progress-fill').style.width = '0%';
+  $('progress-label').textContent = '0 / 0';
+  $('progress-found').textContent = '0 dispositivos encontrados';
+
+  const btnStart = $('btn-start-scan');
+  btnStart.textContent = 'Cancelar varredura';
+
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${window.location.host}/ws/network-scan`);
+  discoveryState.ws = ws;
+
+  ws.addEventListener('open', () => {
+    ws.send(JSON.stringify({ network: range }));
+  });
+  ws.addEventListener('message', (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+      handleScanMessage(msg);
+    } catch (e) {
+      console.warn('[NetScan] mensagem inválida:', evt.data);
+    }
+  });
+  ws.addEventListener('close', () => {
+    finalizeScanUI();
+  });
+  ws.addEventListener('error', (e) => {
+    console.error('[NetScan] WS error', e);
+    showToast('Falha na conexão WebSocket de varredura.', 'error');
+  });
+}
+
+function cancelNetworkScan() {
+  if (discoveryState.ws && discoveryState.ws.readyState === WebSocket.OPEN) {
+    discoveryState.ws.close();
+  }
+  showToast('Varredura cancelada.', 'info');
+}
+
+// Limpa a lista de equipamentos descobertos (sem afetar os já adicionados ao
+// monitoramento). Útil quando você adicionou o que queria e não precisa mais
+// ver o resultado da varredura.
+function clearDiscoveryList() {
+  if (discoveryState.scanning) {
+    showToast('Aguarde a varredura terminar para limpar a lista.', 'info');
+    return;
+  }
+  discoveryState.devices = {};
+  discoveryState.found   = 0;
+  discoveryState.scanned = 0;
+  discoveryState.total   = 0;
+
+  $('discovery-results').innerHTML = '';
+  $('discovery-actions').style.display = 'none';
+  const progress = $('discovery-progress');
+  if (progress) progress.style.display = 'none';
+
+  showToast('Lista de varredura limpa.', 'info');
+}
+
+function handleScanMessage(msg) {
+  switch (msg.type) {
+    case 'scan_started':
+      discoveryState.total = msg.total || 0;
+      updateScanProgress();
+      break;
+
+    case 'host_scanned':
+      discoveryState.scanned++;
+      updateScanProgress();
+      break;
+
+    case 'host_found':
+      discoveryState.scanned++;
+      discoveryState.found++;
+      discoveryState.devices[msg.ip] = msg;
+      renderDiscoveryCard(msg);
+      updateScanProgress();
+      break;
+
+    case 'scan_complete':
+      updateScanProgress();
+      if ((msg.found || 0) === 0 && discoveryState.found === 0) {
+        $('discovery-results').innerHTML =
+          '<div class="discovery-empty">Nenhum equipamento de rede encontrado no range informado.</div>';
+      } else {
+        $('discovery-actions').style.display = '';
+      }
+      showToast(
+        `🛰️ Varredura concluída — ${discoveryState.found} dispositivo(s) encontrado(s).`,
+        discoveryState.found > 0 ? 'success' : 'info'
+      );
+      break;
+
+    case 'error':
+      showToast(`Erro na varredura: ${msg.message}`, 'error');
+      break;
+  }
+}
+
+function updateScanProgress() {
+  const total = Math.max(1, discoveryState.total);
+  const pct = Math.min(100, (discoveryState.scanned / total) * 100);
+  $('progress-fill').style.width = `${pct}%`;
+  $('progress-label').textContent = `${discoveryState.scanned} / ${discoveryState.total}`;
+  $('progress-found').textContent =
+    `${discoveryState.found} dispositivo${discoveryState.found === 1 ? '' : 's'} encontrado${discoveryState.found === 1 ? '' : 's'}`;
+}
+
+function finalizeScanUI() {
+  discoveryState.scanning = false;
+  const btnStart = $('btn-start-scan');
+  if (btnStart) {
+    btnStart.disabled = false;
+    btnStart.textContent = 'Iniciar varredura';
+  }
+  // Esconde o progresso depois de 1.2s para dar feedback visual final.
+  setTimeout(() => {
+    if (!discoveryState.scanning) $('discovery-progress').style.display = 'none';
+  }, 1200);
+  discoveryState.ws = null;
+}
+
+function renderDiscoveryCard(device) {
+  const container = $('discovery-results');
+  if (!container) return;
+
+  // Remove placeholder vazio se existir.
+  const empty = container.querySelector('.discovery-empty');
+  if (empty) empty.remove();
+
+  const card = document.createElement('div');
+  card.className = 'discovery-card';
+  card.dataset.ip = device.ip;
+
+  const typeKey = (device.device_type || 'unknown').toLowerCase();
+  const typeLabel = DEVICE_TYPE_LABELS[typeKey] || typeKey;
+
+  const portTags = (device.open_ports || [])
+    .map(p => `<span class="port-tag" title="${p.service}">${p.port}/${escHtml(p.service)}</span>`)
+    .join('');
+  const mgmtTags = (device.manageable_via || [])
+    .map(m => `<span class="mgmt-tag">${escHtml(m)}</span>`)
+    .join('');
+
+  card.innerHTML = `
+    <input type="checkbox" class="discovery-card-checkbox" data-ip="${device.ip}" />
+    <div class="discovery-card-body">
+      <div class="discovery-card-row-1">
+        <span class="discovery-ip">${escHtml(device.ip)}</span>
+        <span class="device-type-badge device-type-${typeKey}">${escHtml(typeLabel)}</span>
+        <span class="discovery-vendor">${escHtml(device.vendor || 'Desconhecido')}</span>
+        ${device.mac ? `<span class="discovery-mac">${escHtml(device.mac)}</span>` : ''}
+      </div>
+      <div class="discovery-card-row-2">
+        ${mgmtTags}
+        ${portTags}
+      </div>
+    </div>
+    <button type="button" class="discovery-add-btn" data-ip="${device.ip}">Adicionar</button>
+  `;
+
+  card.querySelector('.discovery-add-btn').addEventListener('click', () => {
+    addDiscoveredDevice(device.ip);
+  });
+
+  container.appendChild(card);
+}
+
+function selectAllDiscovered() {
+  const boxes = document.querySelectorAll('#discovery-results .discovery-card-checkbox');
+  const anyUnchecked = Array.from(boxes).some(b => !b.checked && !b.disabled);
+  boxes.forEach(b => { if (!b.disabled) b.checked = anyUnchecked; });
+}
+
+async function addSelectedDiscovered() {
+  const selected = Array.from(
+    document.querySelectorAll('#discovery-results .discovery-card-checkbox:checked')
+  ).map(b => b.dataset.ip);
+
+  if (selected.length === 0) {
+    showToast('Selecione ao menos um dispositivo.', 'warning');
+    return;
+  }
+
+  let added = 0, failed = 0;
+  for (const ip of selected) {
+    const ok = await addDiscoveredDevice(ip, /* silent */ true);
+    if (ok) added++; else failed++;
+  }
+  if (added > 0) showToast(`✅ ${added} dispositivo(s) adicionado(s).`, 'success');
+  if (failed > 0) showToast(`⚠️ ${failed} falha(s) ao adicionar.`, 'warning');
+
+  // Atualiza grid de hardware imediatamente.
+  fetchDevices();
+}
+
+async function addDiscoveredDevice(ip, silent = false) {
+  const device = discoveryState.devices[ip];
+  if (!device) return false;
+
+  const card = document.querySelector(`#discovery-results .discovery-card[data-ip="${CSS.escape(ip)}"]`);
+  const btn  = card?.querySelector('.discovery-add-btn');
+  const cb   = card?.querySelector('.discovery-card-checkbox');
+
+  if (card?.classList.contains('added')) return true;
+
+  card?.classList.add('adding');
+  if (btn) { btn.disabled = true; btn.textContent = 'Adicionando...'; }
+
+  try {
+    const res = await apiFetch(`${API_BASE}/api/infrastructure/devices`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ip: device.ip,
+        mac: device.mac,
+        vendor: device.vendor,
+        device_type: device.device_type,
+        manageable_via: device.manageable_via,
+        open_ports: device.open_ports,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const newDevice = await res.json();
+    // Adiciona ao state local para refletir imediatamente no grid.
+    if (!devices.find(d => d.id === newDevice.id)) devices.push(newDevice);
+    if (currentView === 'HARDWARE') {
+      renderDevices();
+      updateStats();
+    }
+
+    card?.classList.remove('adding');
+    card?.classList.add('added');
+    if (btn) { btn.textContent = 'Adicionado ✓'; btn.classList.add('added'); btn.disabled = true; }
+    if (cb)  { cb.checked = false; cb.disabled = true; }
+
+    if (!silent) showToast(`✅ ${newDevice.name} adicionado ao monitoramento.`, 'success');
+    return true;
+  } catch (err) {
+    card?.classList.remove('adding');
+    if (btn) { btn.disabled = false; btn.textContent = 'Adicionar'; }
+    if (!silent) showToast(`Erro ao adicionar ${ip}: ${err.message}`, 'error');
+    return false;
+  }
+}
+
+/* ============================================================
+   Maintenance Windows (CRUD + modal)
+   ============================================================ */
+
+async function fetchMaintenanceWindows() {
+  try {
+    const res = await fetch(`${API_BASE}/api/maintenance`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    maintenanceWindows = await res.json();
+    // Re-render cards quando o conjunto muda (badge pode aparecer/sumir).
+    if (currentView === 'DATABASE') {
+      renderDbMonitors();
+    } else {
+      renderDevices();
+    }
+  } catch (err) {
+    console.error('[Maintenance] fetch failed:', err);
+  }
+}
+
+function openMaintenanceModal() {
+  resetMaintenanceForm();
+  populateMaintenanceTargets();
+  renderMaintenanceList();
+  fetchMaintenanceWindows().then(renderMaintenanceList);
+  $('modal-maintenance-overlay').classList.add('open');
+}
+
+function closeMaintenanceModal() {
+  $('modal-maintenance-overlay').classList.remove('open');
+  editingMaintenanceId = null;
+}
+
+function populateMaintenanceTargets() {
+  const sel = $('input-mw-target');
+  if (!sel) return;
+  // Mantém "Todos" e re-adiciona devices + db monitors.
+  const opts = ['<option value="all">Todos os dispositivos (global)</option>'];
+  const webDevices = devices.filter(d => d.device_type === 'WEB');
+  const hwDevices  = devices.filter(d => d.device_type === 'HARDWARE');
+  if (webDevices.length) {
+    opts.push('<optgroup label="Web">');
+    webDevices.forEach(d => opts.push(`<option value="d:${d.id}">${escHtml(d.name)}</option>`));
+    opts.push('</optgroup>');
+  }
+  if (hwDevices.length) {
+    opts.push('<optgroup label="Infraestrutura">');
+    hwDevices.forEach(d => opts.push(`<option value="d:${d.id}">${escHtml(d.name)}</option>`));
+    opts.push('</optgroup>');
+  }
+  if (dbMonitors.length) {
+    opts.push('<optgroup label="Banco de Dados">');
+    dbMonitors.forEach(m => opts.push(`<option value="m:${m.id}">${escHtml(m.nome)}</option>`));
+    opts.push('</optgroup>');
+  }
+  sel.innerHTML = opts.join('');
+}
+
+function resetMaintenanceForm() {
+  editingMaintenanceId = null;
+  $('input-mw-id').value = '';
+  $('input-mw-name').value = '';
+  $('input-mw-recurrence').value = 'none';
+  $('input-mw-target').value = 'all';
+  $('input-mw-is-active').checked = true;
+  toggleRecurrenceFields('none');
+
+  // Defaults sensatos: agora ~ +2h para one-time; 23:00 → 06:00 para daily.
+  const now = new Date();
+  const inTwoHours = new Date(now.getTime() + 2 * 3600 * 1000);
+  $('input-mw-start-datetime').value = toDatetimeLocal(now);
+  $('input-mw-end-datetime').value   = toDatetimeLocal(inTwoHours);
+  $('input-mw-start-time').value = '23:00';
+  $('input-mw-end-time').value   = '06:00';
+
+  $('btn-mw-save').textContent = 'Adicionar';
+}
+
+function toDatetimeLocal(d) {
+  // YYYY-MM-DDTHH:mm para <input type="datetime-local">.
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function toggleRecurrenceFields(rec) {
+  $('mw-onetime-fields').style.display = rec === 'none'  ? '' : 'none';
+  $('mw-daily-fields').style.display   = rec === 'daily' ? '' : 'none';
+}
+
+function parseMaintenanceTargetValue(val) {
+  // "all" | "d:<id>" | "m:<id>" → {device_id, db_monitor_id}
+  if (!val || val === 'all') return { device_id: null, db_monitor_id: null };
+  const [kind, id] = val.split(':');
+  const numId = Number(id);
+  if (kind === 'd') return { device_id: numId, db_monitor_id: null };
+  if (kind === 'm') return { device_id: null, db_monitor_id: numId };
+  return { device_id: null, db_monitor_id: null };
+}
+
+function maintenanceTargetToSelectValue(w) {
+  if (w.device_id != null)     return `d:${w.device_id}`;
+  if (w.db_monitor_id != null) return `m:${w.db_monitor_id}`;
+  return 'all';
+}
+
+async function handleMaintenanceFormSubmit(e) {
+  e.preventDefault();
+  const name = $('input-mw-name').value.trim();
+  const recurrence = $('input-mw-recurrence').value;
+  const isActive = $('input-mw-is-active').checked;
+  const { device_id, db_monitor_id } = parseMaintenanceTargetValue($('input-mw-target').value);
+
+  let starts_at, ends_at;
+  if (recurrence === 'none') {
+    const s = $('input-mw-start-datetime').value;
+    const e2 = $('input-mw-end-datetime').value;
+    if (!s || !e2) {
+      showToast('Preencha início e fim da janela.', 'warning');
+      return;
+    }
+    starts_at = new Date(s).toISOString();
+    ends_at   = new Date(e2).toISOString();
+    if (new Date(ends_at) <= new Date(starts_at)) {
+      showToast('Fim precisa ser depois do início.', 'warning');
+      return;
+    }
+  } else {
+    // daily: ancora datas hoje, mas só a hora-do-dia importa no backend
+    const sT = $('input-mw-start-time').value;
+    const eT = $('input-mw-end-time').value;
+    if (!sT || !eT) {
+      showToast('Preencha hora de início e fim.', 'warning');
+      return;
+    }
+    const today = new Date();
+    const [sh, sm] = sT.split(':').map(Number);
+    const [eh, em] = eT.split(':').map(Number);
+    const sDate = new Date(today.getFullYear(), today.getMonth(), today.getDate(), sh, sm);
+    const eDate = new Date(today.getFullYear(), today.getMonth(), today.getDate(), eh, em);
+    starts_at = sDate.toISOString();
+    ends_at   = eDate.toISOString();
+  }
+
+  const payload = {
+    name: name || null,
+    device_id,
+    db_monitor_id,
+    starts_at,
+    ends_at,
+    recurrence,
+    is_active: isActive,
+  };
+
+  const saveBtn = $('btn-mw-save');
+  saveBtn.disabled = true;
+  saveBtn.textContent = 'Salvando...';
+  try {
+    let res;
+    if (editingMaintenanceId) {
+      res = await apiFetch(`${API_BASE}/api/maintenance/${editingMaintenanceId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } else {
+      res = await apiFetch(`${API_BASE}/api/maintenance`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    showToast(
+      editingMaintenanceId ? '✏️ Janela atualizada.' : '✅ Janela adicionada.',
+      'success'
+    );
+    await fetchMaintenanceWindows();
+    renderMaintenanceList();
+    resetMaintenanceForm();
+  } catch (err) {
+    showToast(`Erro: ${err.message}`, 'error');
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = editingMaintenanceId ? 'Salvar' : 'Adicionar';
+  }
+}
+
+function renderMaintenanceList() {
+  const list = $('mw-list');
+  if (!list) return;
+  if (!maintenanceWindows.length) {
+    list.innerHTML = '<div class="events-empty">Nenhuma janela cadastrada.</div>';
+    return;
+  }
+  // Ordena: ativas-agora primeiro, depois por created_at desc.
+  const sorted = [...maintenanceWindows].sort((a, b) => {
+    if (a.is_currently_active !== b.is_currently_active) {
+      return a.is_currently_active ? -1 : 1;
+    }
+    return (a.created_at < b.created_at) ? 1 : -1;
+  });
+
+  list.innerHTML = sorted.map(w => {
+    const isGlobal = (w.device_id == null) && (w.db_monitor_id == null);
+    let targetLabel = 'GLOBAL';
+    if (w.device_id != null) {
+      const d = devices.find(x => x.id === w.device_id);
+      targetLabel = d ? d.name : `Device #${w.device_id}`;
+    } else if (w.db_monitor_id != null) {
+      const m = dbMonitors.find(x => x.id === w.db_monitor_id);
+      targetLabel = m ? m.nome : `BD #${w.db_monitor_id}`;
+    }
+
+    let intervalLabel;
+    if (w.recurrence === 'daily') {
+      const s = new Date(w.starts_at), e = new Date(w.ends_at);
+      const pad = (n) => String(n).padStart(2, '0');
+      intervalLabel = `Diária ${pad(s.getHours())}:${pad(s.getMinutes())} → ${pad(e.getHours())}:${pad(e.getMinutes())}`;
+    } else {
+      const s = new Date(w.starts_at), e = new Date(w.ends_at);
+      intervalLabel = `${s.toLocaleString('pt-BR', {dateStyle:'short', timeStyle:'short'})} → ${e.toLocaleString('pt-BR', {dateStyle:'short', timeStyle:'short'})}`;
+    }
+
+    return `
+      <div class="mw-row ${w.is_active ? '' : 'inactive'}" data-id="${w.id}">
+        <span class="mw-status-dot ${w.is_currently_active ? 'active' : ''}" title="${w.is_currently_active ? 'Vigente agora' : 'Inativa agora'}"></span>
+        <div class="mw-meta">
+          <span class="mw-meta-line-1">${escHtml(w.name || (isGlobal ? 'Janela global' : 'Janela'))}</span>
+          <span class="mw-meta-line-2">${escHtml(intervalLabel)}</span>
+        </div>
+        <span class="mw-target-badge ${isGlobal ? 'global' : ''}" title="${escHtml(targetLabel)}">${escHtml(targetLabel.length > 22 ? targetLabel.slice(0,22)+'…' : targetLabel)}</span>
+        <div class="mw-actions">
+          <button type="button" class="mw-action-btn" data-action="edit" data-id="${w.id}">Editar</button>
+          <button type="button" class="mw-action-btn danger" data-action="delete" data-id="${w.id}">Excluir</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  list.querySelectorAll('.mw-action-btn').forEach(btn => {
+    const id = Number(btn.dataset.id);
+    if (btn.dataset.action === 'edit') {
+      btn.addEventListener('click', () => loadMaintenanceForEdit(id));
+    } else {
+      btn.addEventListener('click', () => deleteMaintenanceWindow(id));
+    }
+  });
+}
+
+function loadMaintenanceForEdit(id) {
+  const w = maintenanceWindows.find(x => x.id === id);
+  if (!w) return;
+  editingMaintenanceId = id;
+  $('input-mw-id').value = id;
+  $('input-mw-name').value = w.name || '';
+  $('input-mw-recurrence').value = w.recurrence;
+  toggleRecurrenceFields(w.recurrence);
+  $('input-mw-target').value = maintenanceTargetToSelectValue(w);
+  $('input-mw-is-active').checked = w.is_active;
+
+  const s = new Date(w.starts_at), e = new Date(w.ends_at);
+  if (w.recurrence === 'none') {
+    $('input-mw-start-datetime').value = toDatetimeLocal(s);
+    $('input-mw-end-datetime').value   = toDatetimeLocal(e);
+  } else {
+    const pad = (n) => String(n).padStart(2, '0');
+    $('input-mw-start-time').value = `${pad(s.getHours())}:${pad(s.getMinutes())}`;
+    $('input-mw-end-time').value   = `${pad(e.getHours())}:${pad(e.getMinutes())}`;
+  }
+  $('btn-mw-save').textContent = 'Salvar';
+  $('input-mw-name').focus();
+}
+
+async function deleteMaintenanceWindow(id) {
+  const w = maintenanceWindows.find(x => x.id === id);
+  if (!w) return;
+  if (!confirm(`Excluir a janela "${w.name || 'sem nome'}"?`)) return;
+  try {
+    const res = await apiFetch(`${API_BASE}/api/maintenance/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    showToast('Janela removida.', 'info');
+    await fetchMaintenanceWindows();
+    renderMaintenanceList();
+    if (editingMaintenanceId === id) resetMaintenanceForm();
+  } catch (err) {
+    showToast(`Erro ao excluir: ${err.message}`, 'error');
   }
 }
 

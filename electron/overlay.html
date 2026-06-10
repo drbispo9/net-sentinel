@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NetSentinel — Alerta</title>
+  <style>
+    * { box-sizing: border-box; }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+    }
+
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      /* Fundo semitransparente cobrindo toda a tela. */
+      background: rgba(8, 13, 26, 0.93);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+      cursor: default;
+    }
+
+    .card {
+      max-width: 480px;
+      width: calc(100% - 64px);
+      background: #0f1829;
+      border: 0.5px solid rgba(240, 112, 112, 0.4);
+      border-radius: 16px;
+      padding: 48px;
+      text-align: center;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+      /* Animação de entrada: fade-in de 0.3s. */
+      animation: fade-in 0.3s ease-out both;
+    }
+
+    @keyframes fade-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .icon {
+      font-size: 48px;
+      line-height: 1;
+    }
+
+    .title {
+      color: #f07070;
+      font-size: 26px;
+      font-weight: 600;
+      margin: 16px 0 0;
+    }
+
+    .name {
+      color: #d0e4ff;
+      font-size: 18px;
+      font-weight: 500;
+      margin: 18px 0 0;
+      word-break: break-word;
+    }
+
+    .url {
+      color: #607090;
+      font-size: 12px;
+      margin: 8px 0 0;
+      word-break: break-all;
+    }
+
+    .time {
+      color: #607090;
+      font-size: 11px;
+      margin: 6px 0 0;
+    }
+
+    .divider {
+      height: 1px;
+      background: rgba(99, 179, 255, 0.1);
+      margin: 28px 0;
+      border: 0;
+    }
+
+    .dismiss {
+      background: #1b3058;
+      color: #b8d0f0;
+      border: 0.5px solid rgba(99, 179, 255, 0.3);
+      border-radius: 8px;
+      padding: 12px 28px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+
+    .dismiss:hover  { background: #244070; }
+    .dismiss:active { background: #16294b; }
+  </style>
+</head>
+<body>
+  <div class="card" role="alertdialog" aria-labelledby="title">
+    <div class="icon">⚠️</div>
+    <h1 class="title" id="title">Serviço offline</h1>
+    <p class="name" id="name">—</p>
+    <p class="url" id="url"></p>
+    <p class="time" id="time"></p>
+    <hr class="divider" />
+    <button class="dismiss" id="dismiss" type="button" autofocus>Dispensar</button>
+  </div>
+
+  <script>
+    (function () {
+      var nameEl = document.getElementById('name');
+      var urlEl  = document.getElementById('url');
+      var timeEl = document.getElementById('time');
+
+      // Recebe os dados enviados pelo processo principal e preenche o card.
+      if (window.electronAPI && typeof window.electronAPI.onOverlayData === 'function') {
+        window.electronAPI.onOverlayData(function (data) {
+          data = data || {};
+          nameEl.textContent = data.name || 'Serviço';
+          urlEl.textContent  = data.url || '';
+          timeEl.textContent = data.time ? 'Detectado às ' + data.time : '';
+        });
+      }
+
+      function dismiss() {
+        if (window.electronAPI && typeof window.electronAPI.closeOverlay === 'function') {
+          window.electronAPI.closeOverlay();
+        }
+      }
+
+      document.getElementById('dismiss').addEventListener('click', dismiss);
+
+      // Tecla Esc também dispensa o alerta.
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') dismiss();
+      });
+    })();
+  </script>
+</body>
+</html>

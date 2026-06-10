@@ -11,6 +11,15 @@ __pycache__/
 
 # Database
 *.db
+*.db-wal
+*.db-shm
+
+# Node / Electron
+node_modules/
+dist/
+
+# Claude Code
+.claude/
 
 # IDE
 .vscode/
