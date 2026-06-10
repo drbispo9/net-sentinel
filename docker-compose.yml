@@ -1,0 +1,38 @@
+# PostgreSQL para o NetSentinel.
+#
+# Subir:    docker compose up -d
+# Logs:     docker compose logs -f postgres
+# Derrubar: docker compose down            (mantém os dados no volume)
+# Zerar:    docker compose down -v         (APAGA o volume e os dados)
+#
+# Depois de subir, aponte o backend para este banco no .env:
+#   DATABASE_URL=postgresql+asyncpg://netsentinel:netsentinel@localhost:5432/netsentinel
+#
+# As credenciais abaixo são para desenvolvimento. Em produção, troque a senha
+# (POSTGRES_PASSWORD) e reflita a mesma no DATABASE_URL do backend.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: netsentinel-postgres
+    restart: unless-stopped
+    environment:
+      # Lidos do arquivo .env (mesmo diretório). NÃO versionar a senha aqui.
+      # O `:?` faz o compose falhar com mensagem clara se a variável faltar.
+      POSTGRES_USER: ${POSTGRES_USER:-netsentinel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+      POSTGRES_DB: ${POSTGRES_DB:-netsentinel}
+      # Locale/encoding consistentes para acentuação (pt-BR).
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - netsentinel_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netsentinel -d netsentinel"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  netsentinel_pgdata:

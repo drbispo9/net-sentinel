@@ -6,7 +6,7 @@ Sistema completo para monitorar dispositivos Web (HTTP/HTTPS) e Hardware (IP/Pin
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?logo=fastapi&logoColor=white)
-![SQLite](https://img.shields.io/badge/SQLite-Async-003B57?logo=sqlite&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Async-4169E1?logo=postgresql&logoColor=white)
 
 ---
 
@@ -28,7 +28,7 @@ Monitotamento/
 │   ├── main.py          # API FastAPI (rotas, WebSocket, CORS)
 │   ├── models.py        # Modelos SQLAlchemy (Device, EventLog)
 │   ├── schemas.py       # Schemas Pydantic (validação)
-│   ├── database.py      # Engine async SQLite
+│   ├── database.py      # Engine async (PostgreSQL/SQLite) + pool
 │   ├── monitor.py       # Loop de monitoramento assíncrono
 │   └── init_db.py       # Inicialização do banco
 ├── frontend/
@@ -67,6 +67,24 @@ pip install -r requirements.txt
 ```bash
 copy .env.example .env
 # Edite o .env com suas configurações
+```
+
+### 4.1. Suba o banco PostgreSQL (recomendado)
+```bash
+docker compose up -d        # sobe o Postgres com volume persistente
+```
+O `.env.example` já vem apontando para esse banco:
+`postgresql+asyncpg://netsentinel:netsentinel@localhost:5432/netsentinel`.
+As tabelas são criadas automaticamente na primeira inicialização do servidor.
+
+> Sem Docker? Use o fallback SQLite descomentando a linha `sqlite+aiosqlite://...`
+> no `.env` — não requer servidor, mas não suporta concorrência tão bem.
+
+**Migrar dados de um SQLite existente para o Postgres** (opcional):
+```bash
+python -m backend.migrate_sqlite_to_postgres \
+  --sqlite sqlite+aiosqlite:///./netsentinel.db \
+  --postgres postgresql+asyncpg://netsentinel:netsentinel@localhost:5432/netsentinel
 ```
 
 ### 5. Inicie o servidor
@@ -139,10 +157,10 @@ pytest
 
 ## 🛠️ Tecnologias
 
-- **Backend:** Python, FastAPI, SQLAlchemy (async), aiosqlite, httpx
+- **Backend:** Python, FastAPI, SQLAlchemy (async), asyncpg/aiosqlite, httpx
 - **Frontend:** HTML5, CSS3 (vanilla), JavaScript (vanilla)
 - **Comunicação:** REST API + WebSocket
-- **Banco:** SQLite (async)
+- **Banco:** PostgreSQL (async, recomendado) com fallback SQLite
 
 ---
 
