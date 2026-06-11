@@ -6,7 +6,7 @@ Sistema completo para monitorar dispositivos Web (HTTP/HTTPS) e Hardware (IP/Pin
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?logo=fastapi&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Async-4169E1?logo=postgresql&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-Async-003B57?logo=sqlite&logoColor=white)
 
 ---
 
@@ -44,43 +44,8 @@ Monitotamento/
 
 ## 🚀 Como Rodar
 
-Há dois caminhos: **(A) tudo em Docker** (recomendado — não precisa de Python
-nem dependências na máquina) ou **(B) backend no host** com o Postgres em Docker.
-
----
-
-## 🐳 Opção A — Tudo em Docker (recomendado)
-
-Sobe **backend (API + frontend) + PostgreSQL** com um comando.
-
-```bash
-git clone https://github.com/drbispo9/net-sentinel.git
-cd net-sentinel
-
-cp .env.example .env          # edite e defina ao menos POSTGRES_PASSWORD
-docker compose up -d --build  # builda a imagem e sobe todo o stack
-```
-
-Acesse **http://localhost:8000**. As tabelas são criadas automaticamente no
-primeiro start.
-
-| Ação | Comando |
-|---|---|
-| Ver logs do backend | `docker compose logs -f backend` |
-| Parar (mantém dados) | `docker compose down` |
-| Parar e **apagar** dados | `docker compose down -v` |
-| Rebuildar após mudar código | `docker compose up -d --build` |
-
-> O serviço `backend` recebe as variáveis do `.env` (via `env_file`) e usa o host
-> `postgres` (nome do serviço) para falar com o banco. O `ping` do monitor de
-> hardware funciona graças à capability `NET_RAW` declarada no compose.
->
-> Já tem um `netsentinel.db` (SQLite) com dados? Veja como importá-lo na seção
-> **Opção B** abaixo (a migração roda a partir do host, onde o arquivo `.db` está).
-
----
-
-## 💻 Opção B — Backend no host (Postgres em Docker)
+O backend roda direto no host (Python) e serve também o frontend. Por padrão usa
+**SQLite** (banco em arquivo, sem servidor) — basta clonar, instalar e subir.
 
 ### 1. Clone o repositório
 ```bash
@@ -103,27 +68,16 @@ pip install -r requirements.txt
 
 ### 4. Configure o ambiente
 ```bash
-copy .env.example .env
-# Edite o .env com suas configurações
+copy .env.example .env     # Windows  (Linux/Mac: cp .env.example .env)
+# Edite o .env se quiser. O padrão já usa SQLite e funciona sem alterações.
 ```
 
-### 4.1. Suba o banco PostgreSQL (recomendado)
-```bash
-docker compose up -d        # sobe o Postgres com volume persistente
-```
-O `.env.example` já vem apontando para esse banco:
-`postgresql+asyncpg://netsentinel:netsentinel@localhost:5432/netsentinel`.
-As tabelas são criadas automaticamente na primeira inicialização do servidor.
+O `.env.example` já vem apontando para o SQLite local
+(`sqlite+aiosqlite:///./netsentinel.db`). As tabelas são criadas automaticamente
+na primeira inicialização do servidor.
 
-> Sem Docker? Use o fallback SQLite descomentando a linha `sqlite+aiosqlite://...`
-> no `.env` — não requer servidor, mas não suporta concorrência tão bem.
-
-**Migrar dados de um SQLite existente para o Postgres** (opcional):
-```bash
-python -m backend.migrate_sqlite_to_postgres \
-  --sqlite sqlite+aiosqlite:///./netsentinel.db \
-  --postgres postgresql+asyncpg://netsentinel:netsentinel@localhost:5432/netsentinel
-```
+> Quer usar PostgreSQL? Rode um Postgres no host e descomente/ajuste a linha
+> `DATABASE_URL=postgresql+asyncpg://...` no `.env`.
 
 ### 5. Inicie o servidor
 ```bash
@@ -198,7 +152,7 @@ pytest
 - **Backend:** Python, FastAPI, SQLAlchemy (async), asyncpg/aiosqlite, httpx
 - **Frontend:** HTML5, CSS3 (vanilla), JavaScript (vanilla)
 - **Comunicação:** REST API + WebSocket
-- **Banco:** PostgreSQL (async, recomendado) com fallback SQLite
+- **Banco:** SQLite (async, padrão) com suporte opcional a PostgreSQL
 
 ---
 
