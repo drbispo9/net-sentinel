@@ -1516,49 +1516,50 @@ select option {
   color: #a78bfa;
 }
 /* ─── Detalhes: validação de conteúdo (texto monitorado) ─── */
+/* Banner coeso: ícone (lupa) + rótulo + valor. O valor pode quebrar em
+   várias linhas quando longo, em vez de truncar com reticências. */
 .details-keyword {
   margin-top: 1rem;
   display: flex;
-  justify-content: center;
   align-items: center;
-  gap: 0.45rem;
-  max-width: 100%;
+  gap: 0.65rem;
+  padding: 0.6rem 0.8rem;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(99, 102, 241, 0.04));
+  border: 1px solid rgba(99, 102, 241, 0.22);
+  border-radius: var(--radius-md);
 }
-/* Tag do rótulo — neutra, discreta */
-.details-keyword-tag {
+/* Ícone de lupa — sinaliza que o texto é "procurado" no conteúdo da página */
+.details-keyword .dk-icon {
   flex-shrink: 0;
-  padding: 3px 9px;
-  font-size: 0.64rem;
+  display: flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  color: #818cf8;
+  background: rgba(99, 102, 241, 0.15);
+  border-radius: var(--radius-sm);
+}
+.details-keyword .dk-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.details-keyword .dk-label {
+  font-size: 0.6rem;
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--color-text-muted);
-  background: rgba(99, 179, 255, 0.06);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  white-space: nowrap;
 }
-/* Seta entre as tags */
-.details-keyword-arrow {
-  flex-shrink: 0;
-  color: var(--color-text-muted);
-  font-size: 0.85rem;
-  line-height: 1;
-}
-/* Tag do valor — índigo da paleta (--color-accent-2) */
-.details-keyword-value {
-  min-width: 0;
-  padding: 3px 9px;
+.details-keyword .dk-value {
   font-family: 'JetBrains Mono', monospace;
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   font-weight: 500;
-  color: #818cf8;
-  background: rgba(99, 102, 241, 0.12);
-  border: 1px solid rgba(99, 102, 241, 0.25);
-  border-radius: var(--radius-sm);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: #a5b4fc;
+  word-break: break-word;
+  line-height: 1.35;
 }
 
 .mw-actions { display: flex; gap: 4px; }
